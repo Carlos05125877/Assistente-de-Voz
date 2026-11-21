@@ -1,164 +1,104 @@
-# 🤖 J.A.R.V.I.S. — Sistema Completo para ESP32 (`ESP-WROOM-32` / `ESP32S`) + Servidor Externo Bridge
+# 🤖 J.A.R.V.I.S. — Assistente de voz com ESP32 + servidor na nuvem
 
-Sistema completo de assistente de voz inteligente inspirado no **J.A.R.V.I.S.**, desenvolvido sob medida para o **ESP32 WiFi + Bluetooth (`ESP-WROOM-32`)**, equipado com **2 Alto-Falantes em Estéreo Real (Canal L + Canal R)** e **1 Microfone Digital I2S**, **sem sensor de distância**.
+O **ESP-WROOM-32** é só "boca e ouvido": microfone INMP441, 2 alto-falantes MAX98357A e um botão.
+**Toda a inteligência roda no servidor** (`external_server/jarvis_bridge_server.py`), hospedado no
+**Fly.io (região São Paulo)** ou num PC da rede local.
 
----
+```
+ ESP32 ──POST /api/voice (áudio PCM enquanto você fala)──▶ Servidor
+                                                            ├─ Groq Whisper (voz → texto)
+                                                            ├─ Gemini + ferramentas em Python
+                                                            │    Spotify · YouVersion · SmartLife/Tuya · alarmes · timers
+                                                            │    lembretes · listas · rotinas · notícias · cotações · Wikipédia
+                                                            └─ Edge-TTS (pt-BR-AntonioNeural) em blocos
+ ESP32 ◀──────────── resposta PCM 16 kHz tocada enquanto chega ───┘
+ ESP32 ──GET /api/device/poll (long-poll)──▶ comandos do painel na hora (funciona atrás do roteador)
+```
 
-## 🌟 O Que Este Sistema Faz
-
-1. **🎵 Conexão Completa com o Spotify**:
-   - Busca e toca músicas, artistas, álbuns e playlists por comando de voz (*"Jarvis, toca Coldplay no Spotify"*).
-   - Controles de **Play, Pause, Próxima Música, Música Anterior, Volume (0-100%)** e consulta da faixa atual (*"Que música está tocando?"*).
-   - Funciona tanto **diretamente no ESP32** (via OAuth2 Refresh Token) quanto via **Servidor Externo Jarvis Bridge** (com login no Spotify em 1 clique e streaming de áudio PCM direto para os 2 alto-falantes do ESP32).
-2. **📖 Conexão Oficial com o App da Bíblia (`Holy Bible / YouVersion` — `https://www.bible.com/pt/reading-plans`)**:
-   - Conecta diretamente com o ecossistema do **App da Bíblia (YouVersion)**:
-     - **Planos de Leitura & Devocionais Diários** (`https://www.bible.com/pt/reading-plans`): guarda na memória Flash `NVS` do ESP32 (e no Servidor Externo) qual Plano de Leitura você está fazendo e em qual **Dia do Plano** você está (`Dia 1`, `Dia 2`, `Dia 3`...).
-     - Lê por voz nos 2 alto-falantes a **Reflexão Devocional do Dia + a Passagem Bíblica (NVI/ARC/NVT)** e avança automaticamente ou por comando de voz (*"Jarvis, leia o meu devocional de hoje"*, *"Avance para o próximo dia do meu plano da Bíblia"*).
-     - Inicia novos planos por tema (*ansiedade e paz, sabedoria em Provérbios, esperança e fé, gratidão e louvor*) ou por **qualquer URL/ID de plano de `https://www.bible.com/pt/reading-plans`**.
-     - Busca o **Versículo do Dia Oficial** de `https://www.bible.com/pt/verse-of-the-day` e qualquer capítulo/versículo nas traduções **NVI (`129`), ARC (`211`), NVT (`193`) e ARA (`1608`)** de `bible.com/pt/bible`.
-3. **⏰ Guardião de Alarmes Persistentes (`NVS`) e Timers**:
-   - **Guarda até 8 Alarmes Despertadores por horário (`HH:MM`) na memória Flash NVS do ESP32** (não apaga ao desligar da tomada e sincroniza automaticamente com o Servidor Externo!).
-   - Suporta alarmes diários recorrentes ou únicos, além de **5 Timers regressivos simultâneos** e **Lista de Lembretes/Notas persistente**.
-   - Quando o horário do alarme chega, o Jarvis toca o **alarme estéreo espacial** nos 2 alto-falantes e anuncia o rótulo do alarme por voz neural!
-4. **🖥️ Servidor Externo Opcional (`external_server/jarvis_bridge_server.py`)**:
-   - Servidor leve em Python (`FastAPI`) para rodar no PC, Raspberry Pi ou VPS.
-   - Alivia `~85 KB` de RAM e conexões TLS/HTTPS do ESP32, oferece login OAuth2 do Spotify com 1 clique no navegador (`http://localhost:8080`) e faz backup automático dos alarmes e histórico bíblico em `jarvis_data.json`.
-5. **🏠 Casa Inteligente (`SmartLife / Tuya IoT`) + Clima (`Open-Meteo`) + Painel Web HUD (`http://jarvis.local`)**:
-   - Controle de lâmpadas, fitas LED RGB, ar-condicionado e tomadas inteligentes + painel web completo com cards dedicados para **Voz/Gemini**, **Spotify**, **App Bíblia**, **Alarmes NVS**, **Teste Estéreo L/R** e **SmartLife**.
+### Por que o ESP32 virou "thin client"
+- **Uma conexão por pergunta.** Antes, o ESP abria várias conexões HTTPS a cada pergunta (Groq, Gemini, às vezes Tuya/Spotify). Cada handshake TLS no ESP32 custa RAM e tempo. Agora o ESP abre uma única conexão com o servidor, e é o servidor que chama as APIs.
+- **Firmware muito menor.** Saíram Gemini, ferramentas, Spotify, Tuya, Bíblia e os JSON grandes. Sobram 3 arquivos pequenos (`audio_io.h`, `server_link.h`, `jarvis_esp32.ino`), e o firmware cabe numa partição com **OTA** (atualização pelo WiFi).
+- **Chaves e configuração só no servidor.** Chaves de API, alarmes, dispositivos e rotinas são editados no painel, sem regravar o ESP.
+- **Sem servidor:** o botão toca um som de erro, e os **alarmes ficam espelhados na NVS** do ESP e tocam mesmo assim.
 
 ---
 
-## 🔌 Esquema de Ligação (Pinout Seguro para `ESP-WROOM-32` — Sem Sensor de Distância)
-
-> **ATENÇÃO**: No `ESP-WROOM-32`, os pinos `GPIO 6 a 11` são usados pela memória Flash interna. Nunca ligue periféricos nesses pinos. Todos os pinos abaixo são 100% seguros.
-
-### 1. Microfone Digital I2S (`INMP441` ou `ICS-43434`)
-| Pino do Microfone | Pino do `ESP-WROOM-32` | Observação |
-| :--- | :--- | :--- |
-| **VDD** | `3.3V` | **NUNCA ligue em 5V!** |
-| **GND** | `GND` | Terra comum |
-| **L/R** | `GND` | Define captura no canal Esquerdo |
-| **SCK (BCLK)** | `GPIO 26` | Clock de bits I2S0 |
-| **WS (LRCLK)** | `GPIO 25` | Word Select I2S0 |
-| **SD (DOUT)** | `GPIO 33` | Entrada de dados de áudio |
-
-### 2. Dois Alto-Falantes com 2x Amplificadores I2S `MAX98357A` (ou 1x DAC Estéreo `PCM5102A`)
-| Pino dos 2x `MAX98357A` | Pino do `ESP-WROOM-32` | Configuração Estéreo (Canal L vs Canal R) |
-| :--- | :--- | :--- |
-| **VIN** | `5V` (VIN/VBUS) | Fonte 5V >= 2A recomendada para 2 alto-falantes de 3W/4Ω |
-| **GND** | `GND` | Terra comum |
-| **BCLK** | `GPIO 14` | Ligado em paralelo nos 2 módulos |
-| **LRC (WS)** | `GPIO 15` | Ligado em paralelo nos 2 módulos |
-| **DIN (DOUT)** | `GPIO 27` | Ligado em paralelo nos 2 módulos |
-| **SD (SD_MODE)** | *Seleciona o Canal* | **Módulo Esquerdo (L)**: ligue `SD` direto no `3.3V`<br>**Módulo Direito (R)**: ligue `SD` ao `3.3V` via resistor `100kΩ–470kΩ` (ou aberto p/ mix L+R) |
-
-### 3. Acionamento por Botão, Web ou Serial (Sem Sensor de Distância)
-- **Botão `BOOT` nativo (`GPIO 0`)**: Pressione para falar com o Jarvis.
-- **Botão Externo Opcional (`GPIO 4` e `GND`)**: Caso queira um botão no gabinete do projeto.
-- **Painel Web HUD (`http://jarvis.local`)**: Botão para ativar o microfone remotamente ou enviar comandos e gerenciar alarmes.
-
----
-
-## 🖥️ Como Usar o Servidor Externo (`external_server/jarvis_bridge_server.py`)
-
-O ESP32 funciona 100% sozinho, mas se quiser aliviar o microcontrolador e facilitar o login do Spotify:
-
-1. Instale as dependências e inicie o servidor no seu computador ou Raspberry Pi:
-   ```bash
-   cd external_server
-   pip install -r requirements.txt
-   python jarvis_bridge_server.py
-   ```
-2. Abra `http://localhost:8080` no navegador, cole seu `Spotify Client ID` e `Client Secret` e clique em **Conectar Conta Spotify**.
-3. No arquivo [config_template.h](file:///c:/Users/carlo/.gemini/antigravity/scratch/jarvis_esp32/config_template.h), coloque o IP do seu computador em `EXTERNAL_SERVER_URL`:
-   ```cpp
-   #define EXTERNAL_SERVER_URL "http://192.168.1.100:8080"
-   ```
-
----
-
-## 🗣️ Exemplos de Comandos de Voz para o Jarvis
-
-- **🎵 Spotify & Música**:
-  - *"Jarvis, toca Bohemian Rhapsody no Spotify"*
-  - *"Jarvis, coloca uma playlist de louvor / rock clássico no Spotify"*
-  - *"Jarvis, pausa a música"* / *"Pula para a próxima faixa"* / *"Volume do Spotify em 70%"*
-- **📖 App da Bíblia (`Holy Bible / YouVersion` — `bible.com/pt/reading-plans`)**:
-  - *"Jarvis, leia o meu devocional e plano de leitura de hoje"*
-  - *"Jarvis, avance para o próximo dia do meu plano no App da Bíblia"*
-  - *"Jarvis, comece um plano de leitura sobre ansiedade e paz no App da Bíblia"*
-  - *"Jarvis, inicie o plano de sabedoria em Provérbios"*
-  - *"Jarvis, quais planos de leitura estão disponíveis no App da Bíblia?"*
-  - *"Jarvis, qual é o versículo do dia no YouVersion?"*
-  - *"Jarvis, leia o Salmo 23 na NVI"* / *"O que diz em João 3:16?"*
-- **⏰ Guardar Alarmes (NVS) & Timers**:
-  - *"Jarvis, guarda um alarme para as 7 e 30 da manhã para trabalhar"*
-  - *"Jarvis, coloca um despertador às 22 horas para tomar remédio"*
-  - *"Jarvis, quais são os meus alarmes salvos?"*
-  - *"Jarvis, remova o alarme das 7 e 30"*
-  - *"Jarvis, coloca um timer de 10 minutos"*
-- **🏠 Casa Inteligente & Sistema**:
-  - *"Jarvis, acende a luz da sala"* / *"Coloca a fita LED em azul"*
-  - *"Jarvis, como está o clima agora?"*
-  - *"Jarvis, relatório completo de status do sistema"*
-
----
-
-## 🔐 Conta pessoal do YouVersion (planos de leitura da sua conta)
-
-O `external_server/jarvis_bridge_server.py` conecta na **sua conta** do App Bíblia e sincroniza os planos em andamento e o dia em que você parou.
-
-1. Rode `python external_server/jarvis_bridge_server.py` e abra `http://127.0.0.1:8080`.
-2. Em **"Sua Conta Pessoal no App Bíblia"**, entre com e-mail/usuário e senha do YouVersion.
-   - O servidor tenta primeiro o **OAuth2 da API do app** (`auth.youversionapi.com/token`), que não depende dos IDs de Server Action do `login.youversion.com` (eles mudam a cada deploy do site). Se falhar, tenta o **login web** (`login.youversion.com` → `bible.com/api/authenticate`), guardando **todos** os cookies do bible.com.
-   - Conta criada com **Google/Apple**? Abra o painel “login social” e cole o valor do cookie `yva` (token Bearer) ou a linha inteira de cookies do `www.bible.com`.
-3. Os planos aparecem em **"📚 Planos de Leitura Sincronizados"**. Clique em **Ativar no Jarvis** em qualquer um. O sync roda de novo sozinho a cada 6 h (para pegar o que você leu no celular) ou quando você clica em **🔄 Sincronizar** ou diz *"Jarvis, sincroniza meus planos"*.
-4. Se a lista ficar vazia, abra **`http://127.0.0.1:8080/youversion/debug`**. Ele mostra o que cada etapa respondeu (status HTTP e estrutura do JSON, **sem tokens, sem e-mail e sem senha**).
-
-**Leitura por voz sem truncar:** o servidor monta o texto completo do dia (devocional + todas as passagens, pela API `reading-plans`/`bible` do YouVersion) e devolve ao ESP32 só um resumo (< 2 KB). O áudio completo é tocado via `GET /api/tts?key=last`, que sintetiza o Edge-TTS **em blocos** e envia PCM 16 kHz em streaming: a voz começa depois do 1º bloco e o texto nunca passa inteiro pela RAM do ESP-WROOM-32. Aperte o botão BOOT/GPIO 4 para interromper.
-
-Exemplos: *"Jarvis, leia meu plano da Bíblia de hoje"*, *"Jarvis, avance para o próximo dia do meu plano"*, *"Jarvis, liste meus planos"*, *"Jarvis, ative o plano 2"*.
-
-> ⚠️ As APIs `*.youversionapi.com` usadas aqui **não são oficiais** (são as mesmas que o app usa). Podem mudar sem aviso, e o uso automatizado pode contrariar os termos do YouVersion. Use só na sua própria conta.
-
----
-
-## 🖥️ Painel de Controle v2 (no PC) — `http://127.0.0.1:8080`
-
-O `jarvis_bridge_server.py` agora serve um painel completo (`external_server/web/panel.html`; o antigo continua em `/classic`):
-
-| Aba | O que tem |
+## 1. Hardware (ESP-WROOM-32)
+| Função | Pinos |
 |---|---|
-| **Visão geral** | Status do ESP32 ao vivo (IP, RAM, WiFi, uptime, volume), clima de 3 dias, plano de hoje com barra de progresso, Spotify com capa, próximos alarmes e caixa de comando |
-| **Comandos & voz** | Histórico das conversas (voz e painel), "fazer o Jarvis falar" qualquer texto (longo inclusive), prévia da voz no navegador, troca de voz/velocidade do Edge-TTS, ações rápidas (briefing, testes L/R, microfone, reiniciar) |
-| **Bíblia** | Login/sync da conta YouVersion, planos com progresso, ativar plano, **leitor** de qualquer dia de qualquer plano (devocional + passagens) com "ouvir aqui" ou "falar no ESP32", busca de passagens, troca de tradução |
-| **Spotify** | Tocando agora (capa, progresso, dispositivo), controles, volume, busca por música/artista/álbum/playlist |
-| **Alarmes & notas** | Alarmes do ESP32 (adicionar/remover), timers rápidos e Pomodoro, lista de lembretes |
-| **Sistema** | Eventos ao vivo, configurações (nome, cidade/coordenadas do clima, IP do ESP32, conteúdo do briefing) |
+| Microfone INMP441 (I2S0) | BCLK 26 · WS 25 · SD 33 (L/R no GND) |
+| 2× MAX98357A estéreo (I2S1) | BCLK 14 · LRC 15 · DIN 27 |
+| Botões | BOOT (GPIO 0) e externo (GPIO 4 → GND) |
+| LED de status | GPIO 2 |
 
-**Como o painel fala com o ESP32:** o ESP32 manda um *heartbeat* a cada 15 s (`POST /api/device/heartbeat`). Os comandos do painel vão direto para `http://<ip-do-esp32>/api/queue`; se o ESP estiver ocupado falando ou inacessível, ficam numa fila e são entregues no próximo heartbeat. No ESP32 os comandos são executados no `loop()`, então o HUD `http://jarvis.local` não trava mais enquanto o Jarvis fala.
+GPIO 6–11 são da flash SPI e não devem ser usados.
 
-### Novas funções de voz
-- **Briefing do dia**: *"Jarvis, me dá o briefing"* → saudação, data, clima, próximos alarmes, devocional do plano (ou resumo) e versículo do dia. Configure o conteúdo na aba Sistema.
-- **Alarme devocional**: alarmes cujo rótulo tem *devocional*, *bíblia*, *briefing* ou *plano* tocam e em seguida leem o briefing com o plano do dia.
-- Sem o PC ligado, o briefing usa só clima + alarmes direto do ESP32.
+## 2. Servidor no Fly.io (recomendado)
+Por que não Netlify/Render free: o Jarvis precisa de um processo **sempre ligado** (agendador de alarmes e lembretes, long-poll do ESP32 e conversa em streaming). Funções serverless têm limite curto de execução, e o plano free do Render "dorme" sem tráfego e apaga os arquivos.
 
-> ⚠️ O painel não tem senha: deixe a porta 8080 acessível apenas na sua rede local.
+```bash
+# 1. Instale o flyctl e faça login: https://fly.io/docs/flyctl/install/
+fly launch --no-deploy --copy-config --name jarvis-SEUNOME --region gru
+fly volumes create jarvis_data --region gru --size 1
+fly secrets set PANEL_PASSWORD='uma-senha-forte' DEVICE_TOKEN="$(openssl rand -hex 16)" \
+               PUBLIC_URL='https://jarvis-SEUNOME.fly.dev'
+fly deploy
+fly secrets list            # anote o DEVICE_TOKEN para o ESP32 (ou defina um valor seu)
+```
+Depois, abra `https://jarvis-SEUNOME.fly.dev`, entre com a senha e preencha, na aba **Sistema**:
+- **Chaves de API:** Groq (voz → texto) e Gemini (IA). As chaves da Tuya são opcionais.
+- **Casa inteligente:** cadastre os dispositivos SmartLife.
+- **Cidade/coordenadas:** usadas pelo clima.
 
----
+Na aba **Spotify**, cadastre a Redirect URI `https://jarvis-SEUNOME.fly.dev/spotify/callback` no Spotify Developer Dashboard e conecte. Na aba **Bíblia**, entre na sua conta YouVersion.
 
-## ✦ Assistente pessoal (lembretes, listas, rotinas, notícias...)
+**Rodar no PC (rede local):**
+```bash
+pip install -r external_server/requirements.txt
+python external_server/jarvis_bridge_server.py   # http://127.0.0.1:8080
+```
+Sem `PANEL_PASSWORD`/`DEVICE_TOKEN`, o servidor fica aberto. Use assim só na rede local.
 
-Tudo roda no PC (`jarvis_bridge_server.py`). O ESP32 só tem uma ferramenta nova no Gemini, a `assistant_tools`. Gerencie tudo na aba **Assistente** do painel.
-
-| Função | Exemplos de voz |
+| Variável | Para que serve |
 |---|---|
-| **Lembretes agendados** (uma vez, diário, seg–sex, semanal). O PC dispara no horário; se o ESP32 estiver ocupado ou offline, o lembrete entra na fila | *"Jarvis, me lembra amanhã às 9 de pagar a conta de luz"* · *"daqui a 20 minutos tirar o bolo do forno"* · *"toda segunda às 19h aula de estrutura de dados"* · *"quais são meus lembretes?"* |
-| **Listas** com qualquer nome (compras, tarefas, farmácia...) | *"adiciona leite, pão e café na lista de compras"* · *"o que tem na lista de tarefas?"* · *"tira o pão da lista"* |
-| **Rotinas**: sequências de passos (falar, comando para o Jarvis, música, volume, esperar, briefing, Bíblia, lista, som), manuais ou em horário fixo | *"Jarvis, ativa a rotina boa noite"* · *"modo foco"* (já vêm as rotinas Bom dia, Boa noite e Foco) |
-| **Datas especiais** com contagem regressiva e idade | *"guarda o aniversário da minha mãe em 25 de novembro de 1970"* · *"quantos dias faltam para o Natal?"* |
-| **Notícias** (Google News, por tema) | *"quais as notícias de hoje?"* · *"notícias sobre tecnologia"* |
-| **Cotações** (dólar, euro, bitcoin, via AwesomeAPI) | *"quanto está o dólar?"* |
-| **Wikipédia** | *"Jarvis, quem foi Santos Dumont?"* |
+| `PANEL_PASSWORD` | Senha do painel (obrigatória na internet) |
+| `DEVICE_TOKEN` | Token que o ESP32 envia no cabeçalho `X-Device-Token` |
+| `PUBLIC_URL` | URL pública (callback do Spotify) |
+| `DATA_DIR` | Pasta persistente dos dados (`/data` no Fly.io) |
+| `GROQ_API_KEY`, `GEMINI_API_KEY`, `TUYA_ACCESS_ID`, ... | Alternativa a cadastrar as chaves no painel |
 
-O briefing do dia pode incluir os lembretes de hoje, as datas especiais próximas, as cotações e 3 manchetes (configure na aba Sistema).
+## 3. Firmware do ESP32
+Crie `secrets_local.h` (está no `.gitignore`):
+```cpp
+#define WIFI_SSID           "MinhaRede"
+#define WIFI_PASSWORD       "minha-senha"
+#define JARVIS_SERVER_URL   "https://jarvis-SEUNOME.fly.dev"   // ou "http://192.168.1.120:8080"
+#define JARVIS_DEVICE_TOKEN "o-mesmo-DEVICE_TOKEN-do-servidor"
+#define OTA_PASSWORD        "troque-esta-senha"
+```
+Grave a primeira vez pelo cabo (PlatformIO ou Arduino IDE, partição *Minimal SPIFFS with OTA*). Depois dá para atualizar pelo WiFi (`upload_protocol = espota`, `upload_port = jarvis.local`, veja `platformio.ini`).
+
+**Uso:**
+- **Para falar:** aperte o botão, espere o *chime* e fale. A gravação para sozinha quando você para de falar.
+- **Para interromper:** aperte o botão enquanto o Jarvis fala.
+- **Pelo Monitor Serial:** ENTER liga o microfone; texto + ENTER envia uma pergunta digitada.
+
+## 4. O que ele faz (exemplos de voz)
+| Área | Exemplos |
+|---|---|
+| Bíblia (sua conta YouVersion) | "leia meu plano de hoje", "avance para o próximo dia", "liste meus planos", "leia Salmos 23" |
+| Briefing | "me dá o briefing", com clima, alarmes, lembretes, aniversários, devocional e versículo (configurável) |
+| Spotify | "toca Coldplay", "pausa", "próxima", "volume do Spotify em 40" |
+| Casa | "liga a luz da sala", "fita LED em azul" |
+| Alarmes/timers | "alarme às 6 e meia", "timer de 10 minutos" (alarmes com *devocional* no nome leem o briefing) |
+| Lembretes | "me lembra amanhã às 9 de pagar a conta", "daqui a 20 minutos tirar o bolo" |
+| Listas | "adiciona leite e café na lista de compras", "o que tem na lista de tarefas?" |
+| Rotinas | "ativa a rotina boa noite", "modo foco" (crie as suas na aba Assistente) |
+| Informação | "notícias de hoje", "quanto está o dólar?", "quem foi Santos Dumont?", "quantos dias faltam pro Natal?" |
+
+Se o Jarvis terminar a resposta com uma pergunta, ele já volta a ouvir.
+
+## 5. Painel de controle
+Abas: **Visão geral**, **Comandos & voz** (fazer o Jarvis falar, prévia de voz, histórico), **Bíblia** (login, planos, leitor), **Spotify**, **Assistente** (lembretes, listas, rotinas, datas, Wikipédia), **Alarmes & notas** e **Sistema** (eventos ao vivo, configurações, chaves de API, casa inteligente). Diagnóstico do YouVersion em `/youversion/debug`.
+
+> ⚠️ As APIs `*.youversionapi.com` usadas para a conta do YouVersion **não são oficiais**: podem mudar sem aviso e o uso automatizado pode contrariar os termos do serviço. Use só na sua própria conta.

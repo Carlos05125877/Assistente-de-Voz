@@ -41,7 +41,12 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
 from typing import Optional, List, Dict, Any, Tuple
 
-DATA_FILE = os.path.join(os.path.dirname(__file__), "jarvis_data.json")
+# Na nuvem (Fly.io etc.) aponte DATA_DIR para o volume persistente (ex: /data)
+DATA_DIR = os.getenv("DATA_DIR") or os.path.dirname(os.path.abspath(__file__))
+DATA_FILE = os.path.join(DATA_DIR, "jarvis_data.json")
+PUBLIC_URL = os.getenv("PUBLIC_URL", "").rstrip("/")          # ex: https://jarvis-carlos.fly.dev
+PANEL_PASSWORD = os.getenv("PANEL_PASSWORD", "")              # senha do painel (obrigatoria na internet)
+DEVICE_TOKEN = os.getenv("DEVICE_TOKEN", "")                  # token que o ESP32 envia em X-Device-Token
 
 HTTP_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -233,7 +238,7 @@ DEFAULT_DATA = {
         "refresh_token": os.getenv("SPOTIFY_REFRESH_TOKEN", ""),
         "access_token": "",
         "expires_at": 0,
-        "redirect_uri": os.getenv("SPOTIFY_REDIRECT_URI", "http://127.0.0.1:8080/spotify/callback"),
+        "redirect_uri": os.getenv("SPOTIFY_REDIRECT_URI") or (f"{PUBLIC_URL}/spotify/callback" if PUBLIC_URL else "http://127.0.0.1:8080/spotify/callback"),
         "last_track": "Nenhuma musica tocando"
     },
     "youversion": {
@@ -286,6 +291,8 @@ def load_data() -> Dict[str, Any]:
                         for subk, subv in v.items():
                             if subk not in data[k]:
                                 data[k][subk] = subv
+                if PUBLIC_URL and "127.0.0.1" in str(data.get("spotify", {}).get("redirect_uri", "")):
+                    data["spotify"]["redirect_uri"] = f"{PUBLIC_URL}/spotify/callback"
                 if data.get("spotify", {}).get("redirect_uri") == "http://localhost:8080/spotify/callback":
                     data["spotify"]["redirect_uri"] = "http://127.0.0.1:8080/spotify/callback"
                 if not data.get("spotify", {}).get("client_id"):
@@ -1993,9 +2000,10 @@ def render_dashboard_html() -> str:
 # PAINEL DE CONTROLE v2 — ESTADO DO ESP32, EVENTOS, CONFIGURACOES, CLIMA, BRIEFING
 # ============================================================================
 PANEL_HTML_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web", "panel.html")
-DEVICE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "jarvis_device.json")
+DEVICE_FILE = os.path.join(DATA_DIR, "jarvis_device.json")
 DEVICE_ONLINE_SEC = 75          # sem heartbeat ha mais que isso = offline
 DEVICE_LOCK = threading.RLock()
+DEVICE_COND = threading.Condition(DEVICE_LOCK)    # acorda o long-poll do ESP32 quando chega comando
 EVENTS_LOCK = threading.Lock()
 EVENTS: "deque[Dict[str, Any]]" = deque(maxlen=400)
 _EVENT_SEQ = [0]
@@ -2107,33 +2115,61 @@ def device_online() -> bool:
 
 
 def handle_heartbeat(payload: Dict[str, Any], client_ip: str) -> Dict[str, Any]:
-    """POST /api/device/heartbeat do ESP32. Responde com os comandos pendentes do painel."""
+    """POST /api/device/heartbeat do ESP32 (thin client). Responde com comandos pendentes e o espelho dos alarmes."""
+    now = time.time()
     with DEVICE_LOCK:
         was_online = device_online()
         info = DEVICE.setdefault("info", {})
-        for k in ("ip", "heap", "min_heap", "rssi", "uptime", "volume", "plan", "notes", "timers",
-                  "alarms", "fw", "busy", "spotify"):
+        for k in ("heap", "min_heap", "rssi", "uptime", "volume", "fw", "busy"):
             if k in payload:
                 info[k] = payload[k]
         info["ip"] = payload.get("ip") or client_ip
-        DEVICE["last_seen"] = time.time()
-        lu, lr = str(payload.get("last_user") or ""), str(payload.get("last_reply") or "")
-        convs = DEVICE.setdefault("conversations", [])
-        if lr and (not convs or convs[-1].get("reply") != lr or convs[-1].get("user") != lu):
-            convs.append({"time": datetime.now().strftime("%d/%m %H:%M"), "user": lu, "reply": lr})
-            del convs[:-60]
-            log_event("voz", f"Você: {lu} | Jarvis: {lr[:160]}")
-        cmds = DEVICE.get("queue", [])[:6]
-        DEVICE["queue"] = DEVICE.get("queue", [])[6:]
+        DEVICE["last_seen"] = now
+        queue = [c for c in DEVICE.get("queue", []) if float(c.get("exp", now + 1)) > now]
+        cmds, DEVICE["queue"] = queue[:6], queue[6:]
         _save_device()
     if not was_online:
         log_event("esp32", f"ESP32 online em {info['ip']} (RAM {info.get('heap', '?')} KB, WiFi {info.get('rssi', '?')} dBm)")
-    if isinstance(payload.get("alarms"), list):
-        data = load_data()
-        if data.get("alarms") != payload["alarms"]:
-            data["alarms"] = payload["alarms"]
-            save_data(data)
-    return {"ok": True, "commands": cmds, "server_time": int(time.time())}
+    resp: Dict[str, Any] = {"ok": True, "commands": [{k: v for k, v in c.items() if k != "exp"} for c in cmds],
+                            "server_time": int(now)}
+    al = load_data().get("alarms", []) or []
+    rev = alarms_rev(al)
+    if str(payload.get("alarms_rev", "")) != rev:      # espelho p/ o ESP tocar alarmes mesmo com o PC desligado
+        resp["alarms"] = [[int(a.get("h", 0)), int(a.get("m", 0)), 1 if a.get("r", True) else 0] for a in al][:12]
+        resp["alarms_rev"] = rev
+    return resp
+
+
+def device_poll(params: Dict[str, str], client_ip: str, wait: float = 25.0) -> Dict[str, Any]:
+    """GET /api/device/poll — long-poll do ESP32. Envia a telemetria na query e espera ate `wait`
+    segundos por comandos. Funciona atras de NAT/roteador (o ESP32 e quem abre a conexao)."""
+    telemetry: Dict[str, Any] = {}
+    for k in ("heap", "min_heap", "rssi", "uptime", "volume", "busy"):
+        if k in params:
+            try:
+                telemetry[k] = int(params[k])
+            except ValueError:
+                pass
+    for k in ("fw", "ip", "alarms_rev"):
+        if k in params:
+            telemetry[k] = params[k]
+    first = handle_heartbeat(telemetry, client_ip)       # atualiza telemetria + espelho de alarmes
+    if first["commands"] or "alarms" in first:
+        return first
+    deadline = time.time() + max(0.0, min(wait, 50.0))
+    with DEVICE_COND:
+        while True:
+            now = time.time()
+            queue = [c for c in DEVICE.get("queue", []) if float(c.get("exp", now + 1)) > now]
+            if queue or now >= deadline:
+                cmds, DEVICE["queue"] = queue[:6], queue[6:]
+                DEVICE["last_seen"] = now
+                if cmds:
+                    _save_device()
+                break
+            DEVICE_COND.wait(deadline - now)
+    first["commands"] = [{k: v for k, v in c.items() if k != "exp"} for c in cmds]
+    return first
 
 
 def tts_store_put(key: str, text: str) -> None:
@@ -2150,41 +2186,6 @@ def tts_store_get(key: str) -> str:
     if key == "last":
         return str(data.get("last_spoken_tts") or "")
     return str((data.get("tts_store") or {}).get(key) or "")
-
-
-ESP_CMD_TYPES = ("speak", "say_key", "ask", "mic", "volume", "alarm_add", "alarm_remove", "alarm_clear",
-                 "note_add", "notes_clear", "timer", "test", "briefing", "bible", "spotify", "restart")
-
-
-def esp_send(cmd: Dict[str, Any]) -> Dict[str, Any]:
-    """Envia um comando ao ESP32: direto em http://<ip>/api/queue ou, se falhar, na fila do heartbeat."""
-    ctype = str(cmd.get("type", ""))
-    if ctype not in ESP_CMD_TYPES:
-        return {"ok": False, "error": f"tipo de comando invalido: {ctype}"}
-    clean: Dict[str, Any] = {"type": ctype}
-    for k in ("text", "key", "h", "m", "v", "label", "r", "mode", "action", "sec"):
-        if k in cmd and cmd[k] not in (None, ""):
-            clean[k] = cmd[k]
-    # Fala longa: o texto completo fica no servidor; o ESP recebe so a chave + um resumo
-    if ctype == "speak" and len(str(clean.get("text", ""))) > 300:
-        full = str(clean["text"])
-        tts_store_put("panel", full)
-        clean = {"type": "say_key", "key": "panel", "text": _short_for_device(full, 280)}
-    st = get_settings()
-    ip = st.get("esp_ip") or DEVICE.get("info", {}).get("ip")
-    if ip:
-        qs = urllib.parse.urlencode({k: (1 if v is True else 0 if v is False else v) for k, v in clean.items()})
-        code, body = http_request(f"http://{ip}/api/queue?{qs}", timeout=4)
-        if code == 200:
-            log_event("painel", f"Comando '{ctype}' enviado ao ESP32 ({ip})")
-            return {"ok": True, "delivered": "direct"}
-    with DEVICE_LOCK:
-        q = DEVICE.setdefault("queue", [])
-        q.append(clean)
-        del q[:-12]
-        _save_device()
-    log_event("painel", f"ESP32 não respondeu; comando '{ctype}' na fila (entregue no próximo heartbeat)", "warn")
-    return {"ok": True, "delivered": "queued"}
 
 
 # ---------------------------------------------------------------- clima
@@ -2341,6 +2342,10 @@ def build_state() -> Dict[str, Any]:
         "bible_history": data.get("bible_history", [])[:10],
         "settings": get_settings(data),
         "voices": PT_VOICES,
+        "timers": timers_view(),
+        "notes": [i["text"] for i in (data.get("lists") or {}).get("notas", []) if not i.get("done")],
+        "secrets": secrets_view(),
+        "smart_devices": data.get("smart_devices", []),
     }
 
 
@@ -2648,7 +2653,7 @@ def run_routine_steps(name: str, steps: List[Dict[str, str]]) -> None:
                 if t == "speak" and a:
                     esp_send({"type": "speak", "text": a})
                 elif t == "ask" and a:
-                    esp_send({"type": "ask", "text": a})
+                    esp_send({"type": "ask", "text": a}, wait=True)
                 elif t == "volume":
                     esp_send({"type": "volume", "v": max(0, min(100, int(re.sub(r"\D", "", a) or 50)))})
                 elif t == "music" and a:
@@ -2657,9 +2662,9 @@ def run_routine_steps(name: str, steps: List[Dict[str, str]]) -> None:
                 elif t == "spotify":
                     handle_spotify_query({"action": (a or "pause").split()[0]})
                 elif t == "briefing":
-                    esp_send({"type": "briefing"})
+                    esp_send({"type": "briefing"}, wait=True)
                 elif t == "bible":
-                    esp_send({"type": "bible", "action": a or "read_plan_day"})
+                    esp_send({"type": "bible", "action": a or "read_plan_day"}, wait=True)
                 elif t == "chime":
                     esp_send({"type": "test", "mode": a or "chime"})
                 elif t == "list":
@@ -3014,6 +3019,7 @@ def scheduler_tick(now: Optional[datetime] = None) -> List[str]:
         esp_send({"type": "speak", "text": f"Lembrete, senhor: {text}."})
     for name, steps in to_run:
         run_routine_steps(name, steps)
+    fired += alarms_tick(now)
     return fired
 
 
@@ -3024,8 +3030,573 @@ def start_scheduler() -> None:
                 scheduler_tick()
             except Exception as e:
                 log_event("agendador", f"erro: {e}", "error")
-            time.sleep(20 - (time.time() % 20))
+            time.sleep(5 - (time.time() % 5))
     threading.Thread(target=_loop, daemon=True, name="jarvis-scheduler").start()
+
+
+# ============================================================================
+# CEREBRO DO J.A.R.V.I.S. — TODA A INTELIGENCIA RODA NO PC
+# ============================================================================
+# O ESP32 virou um "thin client": captura o microfone, toca o audio e obedece a
+# comandos simples (play, tone, volume, listen, restart). Uma conversa por voz e UMA
+# requisicao HTTP na rede local:
+#
+#   ESP32 --POST /api/voice (PCM 16 kHz chunked, enquanto voce fala)--> PC
+#   PC: Groq Whisper (STT) -> Gemini + ferramentas em Python -> Edge-TTS em blocos
+#   PC --resposta PCM 16 kHz em streaming na mesma conexao--> ESP32 (2 alto-falantes)
+#
+# Sem TLS no ESP32 (economiza ~40-50 KB de RAM e ~1 s por handshake), chaves de API
+# so no PC, e qualquer ferramenta nova e so Python.
+# ============================================================================
+import array
+import hashlib
+import hmac
+
+SECRET_KEYS = {
+    "groq_api_key": "GROQ_API_KEY",
+    "gemini_api_key": "GEMINI_API_KEY",
+    "gemini_model": "GEMINI_MODEL",
+    "stt_model": "GROQ_STT_MODEL",
+    "tuya_access_id": "TUYA_ACCESS_ID",
+    "tuya_access_secret": "TUYA_ACCESS_SECRET",
+    "tuya_host": "TUYA_HOST",
+    "smart_webhook_url": "SMARTLIFE_WEBHOOK_URL",
+}
+SECRET_DEFAULTS = {"gemini_model": "gemini-flash-lite-latest", "stt_model": "whisper-large-v3-turbo",
+                   "tuya_host": "openapi.tuyaus.com"}
+AGENT_HISTORY: "deque[Tuple[str, str]]" = deque(maxlen=6)
+TIMERS: List[Dict[str, Any]] = []
+TIMERS_LOCK = threading.Lock()
+WHISPER_HALLUCINATIONS = ("legendas pela comunidade", "amara.org", "obrigado por assistir", "inscreva-se",
+                          "legenda adriana zanotto", "e ai pessoal")
+
+
+def get_secret(name: str) -> str:
+    v = str((load_data().get("secrets") or {}).get(name) or "").strip()
+    return v or os.getenv(SECRET_KEYS.get(name, ""), "") or SECRET_DEFAULTS.get(name, "")
+
+
+def secrets_view() -> Dict[str, Any]:
+    out = {}
+    for k in SECRET_KEYS:
+        v = get_secret(k)
+        secret = "key" in k or "secret" in k
+        out[k] = {"set": bool(v), "value": (v[:4] + "…" + v[-3:] if len(v) > 10 else "•••") if (secret and v) else v}
+    return out
+
+
+def update_secrets(patch: Dict[str, Any]) -> Dict[str, Any]:
+    with data_txn() as data:
+        sec = data.setdefault("secrets", {})
+        for k, v in patch.items():
+            if k in SECRET_KEYS and isinstance(v, str) and v.strip() and "…" not in v:
+                sec[k] = v.strip()
+            elif k in SECRET_KEYS and v == "":
+                pass                      # campo vazio no painel = manter
+    log_event("config", "Chaves/configuracoes de API atualizadas")
+    return secrets_view()
+
+
+# ---------------------------------------------------------------- dispositivo (ESP32 thin client)
+def _tts_key_for(text: str) -> str:
+    key = "s" + uuid.uuid4().hex[:8]
+    with data_txn() as data:
+        store = data.setdefault("tts_store", {})
+        store[key] = text
+        store["last"] = text
+        data["last_spoken_tts"] = text
+        for old in [k for k in store if k.startswith("s") and k != key][:-30]:
+            store.pop(old, None)              # guarda so as 30 falas mais recentes
+    return key
+
+
+def device_send(cmd: Dict[str, Any], ttl: int = 180) -> Dict[str, Any]:
+    """Comando de baixo nivel para o ESP32: play | tone | volume | listen | restart."""
+    clean = {k: v for k, v in cmd.items() if k in ("type", "key", "mode", "v") and v not in (None, "")}
+    ip = get_settings().get("esp_ip")          # so no modo rede local: push direto ao ESP32
+    if ip:
+        code, _ = http_request(f"http://{ip}/api/queue?{urllib.parse.urlencode(clean)}", timeout=3)
+        if code == 200:
+            return {"ok": True, "delivered": "direct"}
+    with DEVICE_COND:
+        q = DEVICE.setdefault("queue", [])
+        q.append({**clean, "exp": time.time() + ttl})
+        del q[:-12]
+        _save_device()
+        DEVICE_COND.notify_all()               # o long-poll do ESP32 recebe na hora
+    return {"ok": True, "delivered": "online" if device_online() else "queued"}
+
+
+def speak_on_device(text: str, chime: bool = False) -> Dict[str, Any]:
+    text = (text or "").strip()
+    if not text:
+        return {"ok": False, "error": "texto vazio"}
+    if chime:
+        device_send({"type": "tone", "mode": "chime"})
+    return device_send({"type": "play", "key": _tts_key_for(text)})
+
+
+def _bg(fn, *a) -> None:
+    threading.Thread(target=fn, args=a, daemon=True).start()
+
+
+ESP_CMD_TYPES = ("speak", "say_key", "ask", "mic", "volume", "alarm_add", "alarm_remove", "alarm_clear",
+                 "note_add", "notes_clear", "timer", "test", "briefing", "bible", "spotify", "restart")
+
+
+def esp_send(cmd: Dict[str, Any], wait: bool = False) -> Dict[str, Any]:
+    """Comandos de alto nivel (painel, rotinas, agendador). Tudo e resolvido aqui; o ESP so toca o audio."""
+    t = str(cmd.get("type", ""))
+    if t not in ESP_CMD_TYPES:
+        return {"ok": False, "error": f"tipo de comando invalido: {t}"}
+    log_event("painel", f"Comando '{t}'")
+    run = (lambda f, *a: f(*a)) if wait else _bg
+
+    if t == "speak":
+        return speak_on_device(str(cmd.get("text", "")))
+    if t == "say_key":
+        return device_send({"type": "play", "key": cmd.get("key") or "last"})
+    if t == "mic":
+        return device_send({"type": "listen"}, ttl=20)
+    if t == "volume":
+        return device_send({"type": "volume", "v": int(cmd.get("v", 70))})
+    if t == "test":
+        return device_send({"type": "tone", "mode": cmd.get("mode", "chime")})
+    if t == "restart":
+        return device_send({"type": "restart"}, ttl=30)
+    if t == "ask":
+        run(lambda q: speak_on_device(run_agent(q, source="painel")["reply"]), str(cmd.get("text", "")))
+        return {"ok": True, "delivered": "server"}
+    if t == "briefing":
+        run(lambda: speak_on_device(build_briefing()["spoken"], chime=True))
+        return {"ok": True, "delivered": "server"}
+    if t == "bible":
+        run(lambda a: speak_on_device(handle_youversion_query({"action": a})["spoken"]), str(cmd.get("action") or "read_plan_day"))
+        return {"ok": True, "delivered": "server"}
+    if t == "spotify":
+        return handle_spotify_query({"action": cmd.get("action") or "now_playing", "q": cmd.get("text", "")})
+    if t == "alarm_add":
+        return {"ok": True, "message": alarm_add(int(cmd.get("h", 7)), int(cmd.get("m", 0)), str(cmd.get("label") or "Despertador"), bool(cmd.get("r", True)))}
+    if t == "alarm_remove":
+        return {"ok": True, "message": alarm_remove(int(cmd.get("h", -1)), int(cmd.get("m", -1)), str(cmd.get("label", "")))}
+    if t == "alarm_clear":
+        return {"ok": True, "message": alarm_clear()}
+    if t == "note_add":
+        return list_add("notas", str(cmd.get("text", "")))
+    if t == "notes_clear":
+        return list_clear("notas")
+    if t == "timer":
+        return {"ok": True, "message": timer_add(int(cmd.get("sec", 60)), str(cmd.get("label") or "timer"))}
+    return {"ok": False}
+
+
+# ---------------------------------------------------------------- alarmes e timers (no servidor)
+def alarms_rev(alarms: List[Dict[str, Any]]) -> str:
+    return hashlib.md5(json.dumps([[a.get("h"), a.get("m"), a.get("r")] for a in alarms]).encode()).hexdigest()[:8]
+
+
+def alarm_add(h: int, m: int, label: str, repeat_daily: bool = True) -> str:
+    if not (0 <= h <= 23 and 0 <= m <= 59):
+        return "Horario invalido."
+    with data_txn() as data:
+        al = data.setdefault("alarms", [])
+        al[:] = [a for a in al if not (a.get("h") == h and a.get("m") == m)]
+        al.append({"h": h, "m": m, "r": bool(repeat_daily), "l": label or "Despertador"})
+        al.sort(key=lambda a: (a["h"], a["m"]))
+    log_event("alarme", f"Alarme {h:02d}:{m:02d} {label}")
+    return f"Alarme salvo para {h:02d}:{m:02d}" + (", todos os dias." if repeat_daily else ".")
+
+
+def alarm_remove(h: int = -1, m: int = -1, label: str = "") -> str:
+    lab = normalize_accents_lower(label)
+    with data_txn() as data:
+        al = data.setdefault("alarms", [])
+        keep = [a for a in al if not ((h >= 0 and a.get("h") == h and (m < 0 or a.get("m") == m)) or
+                                      (lab and lab in normalize_accents_lower(a.get("l", ""))))]
+        removed = len(al) - len(keep)
+        al[:] = keep
+    return f"{removed} alarme(s) removido(s)." if removed else "Nao encontrei esse alarme."
+
+
+def alarm_clear() -> str:
+    with data_txn() as data:
+        data["alarms"] = []
+    return "Todos os alarmes foram apagados."
+
+
+def alarms_spoken() -> str:
+    al = load_data().get("alarms", []) or []
+    if not al:
+        return "Voce nao tem alarmes salvos."
+    return "Alarmes: " + "; ".join(f"{a['h']:02d}:{a['m']:02d} {a.get('l', '')}" + ("" if a.get("r", True) else " (uma vez)") for a in al) + "."
+
+
+def timer_add(seconds: int, label: str) -> str:
+    seconds = max(1, int(seconds))
+    with TIMERS_LOCK:
+        TIMERS.append({"id": _new_id(), "label": label or "timer", "due": time.time() + seconds, "total": seconds})
+    mins, secs = divmod(seconds, 60)
+    parts = ([f"{mins} minuto{'s' if mins != 1 else ''}"] if mins else []) + ([f"{secs} segundo{'s' if secs != 1 else ''}"] if secs else [])
+    dur = " e ".join(parts)
+    log_event("timer", f"Timer {label}: {dur}")
+    return f"Timer de {dur.strip()} iniciado."
+
+
+def timers_view() -> List[Dict[str, Any]]:
+    now = time.time()
+    with TIMERS_LOCK:
+        return [{"id": t["id"], "label": t["label"], "left": int(t["due"] - now)} for t in TIMERS]
+
+
+def timers_spoken() -> str:
+    tv = timers_view()
+    if not tv:
+        return "Nenhum timer ativo."
+    return "Timers: " + "; ".join(f"{t['label']}, faltam {max(0, t['left']) // 60} minutos e {max(0, t['left']) % 60} segundos" for t in tv) + "."
+
+
+def timers_clear() -> str:
+    with TIMERS_LOCK:
+        TIMERS.clear()
+    return "Timers cancelados."
+
+
+def alarms_tick(now: datetime) -> List[str]:
+    fired = []
+    with TIMERS_LOCK:
+        due = [t for t in TIMERS if t["due"] <= now.timestamp()]
+        TIMERS[:] = [t for t in TIMERS if t["due"] > now.timestamp()]
+    for t in due:
+        fired.append("timer:" + t["label"])
+        device_send({"type": "tone", "mode": "alarm"}, ttl=60)
+        speak_on_device(f"Senhor, o timer {t['label']} terminou.")
+    hhmm, today = now.strftime("%H:%M"), now.date().isoformat()
+    to_fire = []
+    with data_txn() as data:
+        fired_map = data.setdefault("alarms_fired", {})
+        for a in list(data.get("alarms", [])):
+            key = f"{a['h']:02d}:{a['m']:02d}"
+            if key == hhmm and fired_map.get(key) != today:
+                fired_map[key] = today
+                to_fire.append(dict(a))
+                if not a.get("r", True):
+                    data["alarms"].remove(a)
+    for a in to_fire:
+        fired.append("alarme:" + a.get("l", ""))
+        log_event("alarme", f"Disparando alarme {a['h']:02d}:{a['m']:02d} {a.get('l', '')}")
+        device_send({"type": "tone", "mode": "alarm"}, ttl=300)
+        speak_on_device(f"Atenção, senhor! São {a['h']} e {a['m']:02d}. Alarme: {a.get('l', 'despertador')}.")
+        lab = normalize_accents_lower(a.get("l", ""))
+        if any(w in lab for w in ("devocional", "biblia", "briefing", "plano")):
+            _bg(lambda: speak_on_device(build_briefing()["spoken"]))
+    return fired
+
+
+# ---------------------------------------------------------------- casa inteligente (Tuya / SmartLife)
+_TUYA_TOKEN: Dict[str, Any] = {"token": "", "exp": 0}
+TUYA_COLORS = [("vermelh", 0, 1000), ("laranja", 30, 1000), ("amarel", 60, 1000), ("verde", 120, 1000),
+               ("ciano", 180, 1000), ("azul", 240, 1000), ("rox", 275, 1000), ("rosa", 320, 1000),
+               ("branc", 0, 0), ("quente", 35, 350)]
+
+
+def _tuya_sign(method: str, path: str, body: str, token: str, t: str) -> str:
+    content_hash = hashlib.sha256(body.encode()).hexdigest()
+    string_to_sign = f"{method}\n{content_hash}\n\n{path}"
+    msg = get_secret("tuya_access_id") + token + t + string_to_sign
+    return hmac.new(get_secret("tuya_access_secret").encode(), msg.encode(), hashlib.sha256).hexdigest().upper()
+
+
+def tuya_request(method: str, path: str, body: str = "") -> Dict[str, Any]:
+    host = get_secret("tuya_host")
+    token = ""
+    if path != "/v1.0/token?grant_type=1":
+        if not _TUYA_TOKEN["token"] or time.time() > _TUYA_TOKEN["exp"]:
+            r = tuya_request("GET", "/v1.0/token?grant_type=1")
+            if not r.get("success"):
+                return r
+            _TUYA_TOKEN.update({"token": r["result"]["access_token"], "exp": time.time() + int(r["result"].get("expire_time", 7200)) - 120})
+        token = _TUYA_TOKEN["token"]
+    t = str(int(time.time() * 1000))
+    hdrs = {"client_id": get_secret("tuya_access_id"), "sign": _tuya_sign(method, path, body, token, t), "t": t, "sign_method": "HMAC-SHA256"}
+    if token:
+        hdrs["access_token"] = token
+    if body:
+        hdrs["Content-Type"] = "application/json"
+    code, resp = http_request(f"https://{host}{path}", method=method, headers=hdrs, data_bytes=body.encode() if body else None, timeout=10)
+    try:
+        return json.loads(resp)
+    except Exception:
+        return {"success": False, "msg": f"HTTP {code}"}
+
+
+def smart_devices() -> List[Dict[str, Any]]:
+    return load_data().get("smart_devices", []) or []
+
+
+def _find_device(name: str) -> Optional[Dict[str, Any]]:
+    n = normalize_accents_lower(name)
+    for d in smart_devices():
+        names = [normalize_accents_lower(d.get("name", ""))] + [normalize_accents_lower(x) for x in str(d.get("aliases", "")).split(",") if x.strip()]
+        if any(x and (x == n or x in n or n in x) for x in names):
+            return d
+    return None
+
+
+def smart_control(device_name: str, state: str = "on", brightness: int = -1, color: str = "") -> str:
+    dev = _find_device(device_name)
+    label = dev["name"] if dev else device_name
+    on = normalize_accents_lower(state) not in ("off", "desligar", "desliga", "false", "0")
+    hook = get_secret("smart_webhook_url")
+    if hook:
+        code, _ = http_request(hook, method="POST", json_body={"device": label, "state": "on" if on else "off", "brightness": brightness, "color": color}, timeout=6)
+        if 200 <= code < 300:
+            return f"Pronto, {'liguei' if on else 'desliguei'} {label}."
+    if not dev:
+        names = ", ".join(d["name"] for d in smart_devices()) or "nenhum cadastrado"
+        return f"Nao encontrei o dispositivo {device_name}. Dispositivos: {names}."
+    if not (get_secret("tuya_access_id") and get_secret("tuya_access_secret")):
+        return f"Simulação: eu {'ligaria' if on else 'desligaria'} {label}. Configure as chaves Tuya no painel para controlar de verdade."
+    cmds: List[Dict[str, Any]] = [{"code": dev.get("switch_code") or "switch_led", "value": on}]
+    if on and dev.get("rgb") and brightness is not None and int(brightness) > 0:
+        cmds.append({"code": "bright_value_v2", "value": int(10 + (max(1, min(100, int(brightness))) - 1) * 990 / 99)})
+    if on and dev.get("rgb") and color:
+        c = normalize_accents_lower(color)
+        hit = next(((h, s) for w, h, s in TUYA_COLORS if w in c), None)
+        if hit:
+            if hit[1] == 0:
+                cmds.append({"code": "work_mode", "value": "white"})
+            else:
+                cmds += [{"code": "work_mode", "value": "colour"},
+                         {"code": "colour_data_v2", "value": json.dumps({"h": hit[0], "s": hit[1], "v": 1000})}]
+    r = tuya_request("POST", f"/v1.0/iot-03/devices/{dev['device_id']}/commands", json.dumps({"commands": cmds}, separators=(",", ":")))
+    log_event("casa", f"{label}: {cmds} -> {'OK' if r.get('success') else r.get('msg')}", "info" if r.get("success") else "error")
+    return f"Pronto, {'liguei' if on else 'desliguei'} {label}." if r.get("success") else f"A nuvem Tuya recusou o comando para {label}: {r.get('msg', 'erro')}."
+
+
+# ---------------------------------------------------------------- STT (Groq Whisper)
+def pcm16_rms(pcm: bytes) -> float:
+    if len(pcm) < 4:
+        return 0.0
+    a = array.array("h")
+    a.frombytes(pcm[: len(pcm) - (len(pcm) % 2)])
+    step = max(1, len(a) // 4000)
+    sample = a[::step]
+    return (sum(x * x for x in sample) / len(sample)) ** 0.5
+
+
+def wav_from_pcm16(pcm: bytes, rate: int = 16000) -> bytes:
+    import struct
+    return (b"RIFF" + struct.pack("<I", 36 + len(pcm)) + b"WAVEfmt " +
+            struct.pack("<IHHIIHH", 16, 1, 1, rate, rate * 2, 2, 16) + b"data" + struct.pack("<I", len(pcm)) + pcm)
+
+
+def groq_transcribe(wav: bytes) -> Tuple[str, str]:
+    key = get_secret("groq_api_key")
+    if not key:
+        return "", "Chave da Groq nao configurada (painel > Sistema > Chaves de API)."
+    boundary = "----jarvis" + uuid.uuid4().hex
+    parts = []
+    for name, val in (("model", get_secret("stt_model")), ("language", "pt"), ("response_format", "json"), ("temperature", "0")):
+        parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{val}\r\n'.encode())
+    parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="fala.wav"\r\nContent-Type: audio/wav\r\n\r\n'.encode() + wav + b"\r\n")
+    parts.append(f"--{boundary}--\r\n".encode())
+    code, body = http_request("https://api.groq.com/openai/v1/audio/transcriptions", method="POST",
+                              headers={"Authorization": f"Bearer {key}", "Content-Type": f"multipart/form-data; boundary={boundary}"},
+                              data_bytes=b"".join(parts), timeout=20)
+    if code != 200:
+        return "", f"Groq HTTP {code}: {body[:120]}"
+    try:
+        text = " ".join(str(json.loads(body).get("text", "")).split())
+    except Exception:
+        return "", "Resposta invalida da Groq"
+    if any(h in normalize_accents_lower(text) for h in WHISPER_HALLUCINATIONS) or len(text) < 2:
+        return "", ""
+    return text, ""
+
+
+# ---------------------------------------------------------------- agente (Gemini + ferramentas em Python)
+def _S(desc: str) -> Dict[str, str]:
+    return {"type": "STRING", "description": desc}
+
+
+def _I(desc: str) -> Dict[str, str]:
+    return {"type": "INTEGER", "description": desc}
+
+
+AGENT_TOOLS = [
+    {"name": "spotify_control", "description": "Controla o Spotify: tocar musica/artista/album/playlist, pausar, retomar, pular, voltar, volume, o que esta tocando.",
+     "parameters": {"type": "OBJECT", "required": ["action"], "properties": {
+         "action": _S("play_query, pause, resume, next, previous, volume, now_playing"), "query": _S("O que tocar"),
+         "search_type": _S("track, artist, album ou playlist"), "volume": _I("0 a 100")}}},
+    {"name": "bible_app", "description": "Conta pessoal do usuario no App da Biblia (YouVersion): ler o devocional e as passagens do dia do plano, avancar dia, trocar de plano, listar planos, sincronizar, versiculo do dia, ler uma passagem.",
+     "parameters": {"type": "OBJECT", "required": ["action"], "properties": {
+         "action": _S("read_plan_day, next_plan_day, start_plan, list_plans, sync, verse_of_day, get_passage"),
+         "reference": _S("Passagem para get_passage, ex: Salmos 23:1-4"), "theme": _S("Nome ou numero do plano para start_plan"),
+         "plan_day": _I("Dia especifico do plano")}}},
+    {"name": "smart_home", "description": "Liga/desliga e ajusta lampadas, fitas LED, tomadas e ar-condicionado (SmartLife/Tuya).",
+     "parameters": {"type": "OBJECT", "required": ["device_name", "state"], "properties": {
+         "device_name": _S("Nome do dispositivo"), "state": _S("on ou off"), "brightness": _I("1 a 100"),
+         "color": _S("Cor em portugues")}}},
+    {"name": "jarvis_system", "description": "Alarmes despertadores, timers, notas rapidas, clima, volume dos alto-falantes, status e briefing do dia.",
+     "parameters": {"type": "OBJECT", "required": ["action"], "properties": {
+         "action": _S("set_alarm, list_alarms, remove_alarm, clear_alarms, set_timer, list_timers, cancel_timers, add_note, get_notes, clear_notes, get_weather, set_speaker_volume, system_status, morning_briefing"),
+         "alarm_hour": _I("0-23"), "alarm_minute": _I("0-59"), "alarm_repeat_daily": {"type": "BOOLEAN", "description": "Repetir todo dia"},
+         "timer_seconds": _I("Duracao do timer"), "label": _S("Rotulo do alarme/timer ou texto da nota"), "volume": _I("0 a 100")}}},
+    {"name": "assistant_tools", "description": "Lembretes agendados com data/hora, listas (compras, tarefas...), noticias, cotacoes, Wikipedia, rotinas e datas especiais/aniversarios.",
+     "parameters": {"type": "OBJECT", "required": ["action"], "properties": {
+         "action": _S("reminder_add, reminder_list, reminder_remove, list_add, list_read, list_remove, list_clear, news, quotes, wiki, routine_run, routine_list, date_add, date_countdown"),
+         "query": _S("Texto do lembrete, tema, termo, nome da rotina ou do evento"), "date": _S("AAAA-MM-DD"), "time": _S("HH:MM"),
+         "minutes": _I("Daqui a N minutos"), "repeat": _S("none, daily, weekdays, weekly"), "list_name": _S("Nome da lista"),
+         "items": _S("Itens separados por virgula")}}},
+]
+
+
+def weather_spoken() -> str:
+    w = get_weather()
+    if not w.get("ok"):
+        return "Nao consegui consultar o clima agora."
+    s = f"Em {w['city']}, {w['desc']}, {_fmt_num(w['temp'])} graus, sensação de {_fmt_num(w['feels'])}, umidade de {w['humidity']} por cento."
+    if w.get("days"):
+        d0 = w["days"][0]
+        s += f" Hoje a máxima é {_fmt_num(d0['max'])} e a mínima {_fmt_num(d0['min'])}, com {_fmt_num(d0['rain'])} por cento de chance de chuva."
+    if len(w.get("days", [])) > 1:
+        d1 = w["days"][1]
+        s += f" Amanhã, {d1['desc']}, entre {_fmt_num(d1['min'])} e {_fmt_num(d1['max'])} graus."
+    return s
+
+
+def execute_tool(name: str, args: Dict[str, Any]) -> str:
+    a = args or {}
+    act = str(a.get("action", ""))
+    if name == "spotify_control":
+        p = {"action": act or "now_playing", "q": a.get("query", ""), "type": a.get("search_type", "track")}
+        if a.get("volume") is not None:
+            p["volume"] = str(a["volume"])
+        return handle_spotify_query(p).get("message", "")
+    if name == "bible_app":
+        res = handle_youversion_query({"action": act or "read_plan_day", "ref": a.get("reference", ""),
+                                       "plan": a.get("theme", ""), "day": str(a.get("plan_day") or 0)})
+        return res.get("spoken", "")
+    if name == "smart_home":
+        return smart_control(a.get("device_name", ""), a.get("state", "on"), int(a.get("brightness") or -1), a.get("color", ""))
+    if name == "assistant_tools":
+        p = {k: str(v) for k, v in a.items() if v is not None}
+        return handle_assistant(p).get("spoken", "")
+    if name == "jarvis_system":
+        if act == "set_alarm":
+            return alarm_add(int(a.get("alarm_hour", 7)), int(a.get("alarm_minute", 0)), a.get("label", "Despertador"), bool(a.get("alarm_repeat_daily", True)))
+        if act == "list_alarms":
+            return alarms_spoken()
+        if act == "remove_alarm":
+            return alarm_remove(int(a.get("alarm_hour", -1)), int(a.get("alarm_minute", -1)), a.get("label", ""))
+        if act == "clear_alarms":
+            return alarm_clear()
+        if act == "set_timer":
+            return timer_add(int(a.get("timer_seconds", 60)), a.get("label", "timer"))
+        if act == "list_timers":
+            return timers_spoken()
+        if act == "cancel_timers":
+            return timers_clear()
+        if act == "add_note":
+            return list_add("notas", a.get("label", ""))["spoken"]
+        if act == "get_notes":
+            return list_read("notas")["spoken"]
+        if act == "clear_notes":
+            return list_clear("notas")["spoken"]
+        if act == "get_weather":
+            return weather_spoken()
+        if act == "set_speaker_volume":
+            v = max(0, min(100, int(a.get("volume", 70))))
+            device_send({"type": "volume", "v": v})
+            return f"Volume ajustado para {v} por cento."
+        if act == "system_status":
+            dev = DEVICE.get("info", {})
+            return (f"ESP32 {'online' if device_online() else 'offline'}, memória livre {dev.get('heap', '?')} kilobytes, "
+                    f"sinal WiFi {dev.get('rssi', '?')} dBm, ligado há {int(dev.get('uptime', 0) or 0) // 60} minutos. "
+                    f"Servidor no ar há {int(time.time() - SERVER_STARTED) // 60} minutos. {alarms_spoken()}")
+        if act == "morning_briefing":
+            return build_briefing()["spoken"]
+    return f"Ferramenta {name}/{act} nao reconhecida."
+
+
+def _system_prompt() -> str:
+    st = get_settings()
+    data = load_data()
+    yv = data["youversion"]
+    now = datetime.now()
+    devices = ", ".join(d["name"] for d in smart_devices()) or "nenhum"
+    return (
+        "Voce e o J.A.R.V.I.S., assistente de voz pessoal. Responda SEMPRE em portugues do Brasil, em texto puro "
+        "para ser falado (sem markdown, sem emojis, sem listas com simbolos), de forma elegante e concisa (1 a 3 frases), "
+        f"tratando o usuario por {st.get('user_name') or 'senhor'}. "
+        f"Agora: {WEEKDAYS_PT[now.weekday()]}, {now.strftime('%Y-%m-%d %H:%M')}. "
+        f"Plano de leitura ativo: {yv.get('active_plan_title')} (dia {yv.get('current_day')} de {yv.get('total_days')}). "
+        f"Alarmes: {alarms_spoken()} Dispositivos da casa: {devices}. "
+        "Use as ferramentas sempre que o pedido envolver musica, Biblia/devocional, casa, alarmes, timers, notas, clima, volume, "
+        "lembretes, listas, noticias, cotacoes, Wikipedia, rotinas ou datas especiais. Converta datas relativas para AAAA-MM-DD. "
+        "Para perguntas gerais, responda direto, sem ferramenta."
+    )
+
+
+def gemini_generate(contents: List[Dict[str, Any]], tools: bool = True) -> Tuple[Optional[Dict[str, Any]], str]:
+    key = get_secret("gemini_api_key")
+    if not key:
+        return None, "Chave do Gemini nao configurada (painel > Sistema > Chaves de API)."
+    body: Dict[str, Any] = {"system_instruction": {"parts": [{"text": _system_prompt()}]}, "contents": contents,
+                            "generationConfig": {"temperature": 0.4, "maxOutputTokens": 400}}
+    if tools:
+        body["tools"] = [{"functionDeclarations": AGENT_TOOLS}]
+    model = get_secret("gemini_model")
+    code, resp = http_request(f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}",
+                              method="POST", json_body=body, timeout=25)
+    if code != 200:
+        return None, f"Gemini HTTP {code}: {resp[:160]}"
+    try:
+        return json.loads(resp), ""
+    except Exception:
+        return None, "Resposta invalida do Gemini"
+
+
+def run_agent(user_text: str, source: str = "voz") -> Dict[str, Any]:
+    """Um turno de conversa: Gemini decide as ferramentas, o servidor executa e devolve o texto a falar."""
+    t0 = time.time()
+    contents: List[Dict[str, Any]] = []
+    for u, m in AGENT_HISTORY:
+        contents += [{"role": "user", "parts": [{"text": u}]}, {"role": "model", "parts": [{"text": m}]}]
+    contents.append({"role": "user", "parts": [{"text": user_text}]})
+    resp, err = gemini_generate(contents)
+    tool_out: List[str] = []
+    text_out = ""
+    if resp is None:
+        log_event("agente", err, "error")
+        reply = "Perdao, senhor, nao consegui falar com a inteligencia artificial agora." if "nao configurada" not in err else err
+    else:
+        parts = (((resp.get("candidates") or [{}])[0].get("content") or {}).get("parts")) or []
+        for p in parts:
+            if p.get("text"):
+                text_out += p["text"]
+            fc = p.get("functionCall")
+            if fc:
+                try:
+                    out = execute_tool(fc.get("name", ""), fc.get("args") or {})
+                except Exception as e:
+                    out = f"Erro ao executar {fc.get('name')}: {e}"
+                    log_event("agente", out, "error")
+                log_event("agente", f"ferramenta {fc.get('name')}({json.dumps(fc.get('args') or {}, ensure_ascii=False)[:120]})")
+                if out:
+                    tool_out.append(out)
+        # Resultado das ferramentas e falado direto (ja vem em portugues natural) — economiza uma 2a chamada ao LLM
+        reply = " ".join(tool_out) if tool_out else text_out
+    reply = re.sub(r"[*#`_]+", "", reply or "").strip() or "Desculpe, nao entendi. Pode repetir?"
+    AGENT_HISTORY.append((user_text, reply[:600]))
+    with DEVICE_LOCK:
+        convs = DEVICE.setdefault("conversations", [])
+        convs.append({"time": datetime.now().strftime("%d/%m %H:%M"), "user": user_text, "reply": reply[:1200], "source": source})
+        del convs[:-60]
+        _save_device()
+    log_event("voz", f"Você: {user_text} | Jarvis: {reply[:160]} ({time.time() - t0:.1f}s)")
+    listen_again = reply.rstrip().endswith("?") and not tool_out
+    return {"reply": reply, "listen_again": listen_again, "tools": len(tool_out)}
 
 
 # ============================================================================
@@ -3088,7 +3659,51 @@ class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
     daemon_threads = True
 
 
+LOGIN_HTML = """<!DOCTYPE html><html lang="pt-BR"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>J.A.R.V.I.S. — Entrar</title><style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#060a12;color:#e3eefc;font:15px system-ui,sans-serif}
+form{background:#0b1321;border:1px solid #1a2a42;border-radius:14px;padding:28px;width:300px}h1{color:#34e4ff;letter-spacing:3px;font-size:18px;margin:0 0 18px}
+input{width:100%;box-sizing:border-box;background:#070d18;border:1px solid #223652;color:#fff;padding:10px;border-radius:8px;margin-bottom:12px}
+button{width:100%;background:#34e4ff;border:0;color:#03121c;font-weight:700;padding:10px;border-radius:8px;cursor:pointer}.e{color:#ff5d73;font-size:13px;margin-bottom:10px}</style></head>
+<body><form method="post" action="/login"><h1>J.A.R.V.I.S.</h1>__ERR__<input type="password" name="password" placeholder="Senha do painel" autofocus required>
+<input type="hidden" name="next" value="__NEXT__"><button>Entrar</button></form></body></html>"""
+PUBLIC_PATHS = ("/login", "/healthz", "/favicon.ico")
+DEVICE_PATHS = ("/api/voice", "/api/voice/text", "/api/device/poll", "/api/device/heartbeat", "/api/tts")
+
+
+def _panel_session_value() -> str:
+    return hashlib.sha256(("jarvis-panel-v1:" + PANEL_PASSWORD).encode()).hexdigest()
+
+
 class JarvisBridgeHandler(BaseHTTPRequestHandler):
+    # ---------------------------------------------------------- autenticacao
+    def _cookie(self, name: str) -> str:
+        for part in (self.headers.get("Cookie") or "").split(";"):
+            k, _, v = part.strip().partition("=")
+            if k == name:
+                return v
+        return ""
+
+    def _authorized(self, path: str) -> bool:
+        if path in PUBLIC_PATHS:
+            return True
+        cookie_ok = (not PANEL_PASSWORD) or hmac.compare_digest(self._cookie("jarvis_session"), _panel_session_value())
+        if path in DEVICE_PATHS and DEVICE_TOKEN:
+            given = self.headers.get("X-Device-Token") or ""
+            if given and hmac.compare_digest(given, DEVICE_TOKEN):
+                return True
+            return bool(PANEL_PASSWORD) and cookie_ok
+        return cookie_ok
+
+    def _deny(self, path: str) -> None:
+        if path.startswith("/api/"):
+            self._send_json({"error": "nao autorizado"}, 401)
+        else:
+            self._send_redirect("/login?next=" + urllib.parse.quote(self.path))
+
+    def _login_page(self, nxt: str = "/", err: str = "") -> None:
+        page = LOGIN_HTML.replace("__NEXT__", html.escape(nxt)).replace("__ERR__", f'<div class="e">{html.escape(err)}</div>' if err else "")
+        self._send_html(page, 401 if err else 200)
+
     def _send_json(self, payload: Dict[str, Any], status: int = 200) -> None:
         raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
@@ -3105,7 +3720,7 @@ class JarvisBridgeHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(raw)
 
-    def _stream_tts(self, text: str, voice: str = "") -> None:
+    def _stream_tts(self, text: str, voice: str = "", extra_headers: Optional[Dict[str, str]] = None) -> None:
         """Envia PCM 16 kHz mono em blocos: o ESP32 comeca a falar no 1o bloco enquanto o resto e sintetizado."""
         st = get_settings()
         voice = voice or st["voice"]
@@ -3122,6 +3737,8 @@ class JarvisBridgeHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "application/octet-stream")
         self.send_header("X-Audio-Format", "pcm_s16le;rate=16000;channels=1")
+        for hk, hv in (extra_headers or {}).items():
+            self.send_header(hk, hv)
         if len(chunks) == 1:
             self.send_header("Content-Length", str(len(first)))
         else:
@@ -3157,6 +3774,59 @@ class JarvisBridgeHandler(BaseHTTPRequestHandler):
             return
         super().log_message(fmt, *args)
 
+    def _read_body_bytes(self, limit: int = 3_000_000) -> bytes:
+        """Le o corpo com Content-Length ou Transfer-Encoding: chunked (o ESP32 envia o audio enquanto voce fala)."""
+        if "chunked" in (self.headers.get("Transfer-Encoding") or "").lower():
+            buf = bytearray()
+            while True:
+                line = self.rfile.readline(64)
+                if not line:
+                    break
+                size = int(line.split(b";")[0].strip() or b"0", 16)
+                if size == 0:
+                    while self.rfile.readline(1024) not in (b"\r\n", b"\n", b""):
+                        pass
+                    break
+                chunk = self.rfile.read(size)
+                self.rfile.readline(4)
+                if len(buf) < limit:
+                    buf.extend(chunk)
+            return bytes(buf)
+        n = int(self.headers.get("Content-Length", "0") or "0")
+        return self.rfile.read(min(n, limit)) if n > 0 else b""
+
+    def _send_empty(self, status: int, headers: Optional[Dict[str, str]] = None) -> None:
+        self.send_response(status)
+        for k, v in (headers or {}).items():
+            self.send_header(k, v)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def _handle_voice(self, path: str, body: bytes) -> None:
+        t0 = time.time()
+        if path == "/api/voice/text":
+            transcript = body.decode("utf-8", errors="replace").strip()
+        else:
+            dur, rms = len(body) / 32000.0, pcm16_rms(body)
+            if dur < 0.4 or rms < 80:
+                self._send_empty(204, {"X-Status": "no_speech"})
+                return
+            transcript, err = groq_transcribe(wav_from_pcm16(body))
+            if err:
+                log_event("stt", err, "error")
+                self._stream_tts(f"Nao consegui entender o audio. {err}" if "configurada" in err else "Tive um problema na transcricao, senhor.")
+                return
+            log_event("stt", f"{dur:.1f}s de audio -> '{transcript}' ({time.time() - t0:.1f}s)")
+        if not transcript:
+            self._send_empty(204, {"X-Status": "no_speech"})
+            return
+        res = run_agent(transcript, source="voz" if path == "/api/voice" else "texto")
+        tts_store_put("last", res["reply"])
+        self._stream_tts(res["reply"], extra_headers={
+            "X-Transcript": urllib.parse.quote(transcript[:180]),
+            "X-Listen-Again": "1" if res["listen_again"] else "0",
+        })
+
     def _send_redirect(self, location: str) -> None:
         self.send_response(302)
         self.send_header("Location", location)
@@ -3167,6 +3837,28 @@ class JarvisBridgeHandler(BaseHTTPRequestHandler):
         path = parsed.path
         qs = urllib.parse.parse_qs(parsed.query)
         params = {k: v[0] for k, v in qs.items() if v}
+
+        if not self._authorized(path):
+            self._deny(path)
+            return
+        if path == "/healthz":
+            self._send_bytes(b"ok", "text/plain")
+            return
+        if path == "/login":
+            self._login_page(params.get("next", "/"))
+            return
+        if path == "/logout":
+            self.send_response(302)
+            self.send_header("Set-Cookie", "jarvis_session=; Max-Age=0; Path=/")
+            self.send_header("Location", "/login")
+            self.end_headers()
+            return
+        if path == "/api/device/poll":
+            self._send_json(device_poll(params, self.client_address[0], float(params.get("wait", "25") or 25)))
+            return
+        if path == "/api/secrets":
+            self._send_json(secrets_view())
+            return
 
         if path == "/":
             try:
@@ -3311,10 +4003,34 @@ class JarvisBridgeHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed = urllib.parse.urlparse(self.path)
+        if parsed.path == "/login":
+            n = int(self.headers.get("Content-Length", "0") or "0")
+            form = {k: v[0] for k, v in urllib.parse.parse_qs(self.rfile.read(min(n, 4096)).decode("utf-8", "replace")).items() if v}
+            nxt = form.get("next", "/")
+            nxt = nxt if nxt.startswith("/") and not nxt.startswith("//") else "/"
+            if PANEL_PASSWORD and hmac.compare_digest(form.get("password", ""), PANEL_PASSWORD):
+                secure = "; Secure" if (self.headers.get("X-Forwarded-Proto") == "https" or PUBLIC_URL.startswith("https")) else ""
+                self.send_response(302)
+                self.send_header("Set-Cookie", f"jarvis_session={_panel_session_value()}; Max-Age=2592000; Path=/; HttpOnly; SameSite=Lax{secure}")
+                self.send_header("Location", nxt)
+                self.end_headers()
+                log_event("painel", f"Login no painel de {self.headers.get('Fly-Client-IP') or self.client_address[0]}")
+            else:
+                time.sleep(1.0)                       # freia tentativa de forca bruta
+                log_event("painel", "Senha do painel incorreta", "warn")
+                self._login_page(nxt, "Senha incorreta.")
+            return
+        if not self._authorized(parsed.path):
+            self._deny(parsed.path)
+            return
+        if parsed.path in ("/api/voice", "/api/voice/text"):
+            self._handle_voice(parsed.path, self._read_body_bytes())
+            return
         length = int(self.headers.get("Content-Length", "0") or "0")
         raw_body = self.rfile.read(length).decode("utf-8", errors="replace") if length > 0 else ""
 
-        if parsed.path in ("/api/device/heartbeat", "/api/esp/send", "/api/settings", "/api/assistant/op"):
+        if parsed.path in ("/api/device/heartbeat", "/api/esp/send", "/api/settings", "/api/assistant/op",
+                           "/api/secrets", "/api/smart/devices", "/api/smart/control", "/api/ask"):
             try:
                 body = json.loads(raw_body or "{}")
                 if not isinstance(body, dict):
@@ -3328,6 +4044,23 @@ class JarvisBridgeHandler(BaseHTTPRequestHandler):
                 self._send_json(esp_send(body))
             elif parsed.path == "/api/assistant/op":
                 self._send_json(assistant_op(body))
+            elif parsed.path == "/api/secrets":
+                self._send_json({"ok": True, "secrets": update_secrets(body)})
+            elif parsed.path == "/api/smart/devices":
+                devs = [{"name": str(d.get("name", "")).strip(), "aliases": str(d.get("aliases", "")),
+                         "device_id": str(d.get("device_id", "")).strip(), "switch_code": str(d.get("switch_code") or "switch_led"),
+                         "rgb": bool(d.get("rgb"))} for d in body.get("devices", []) if str(d.get("name", "")).strip()]
+                with data_txn() as data:
+                    data["smart_devices"] = devs
+                self._send_json({"ok": True, "devices": devs})
+            elif parsed.path == "/api/smart/control":
+                self._send_json({"ok": True, "message": smart_control(body.get("name", ""), body.get("state", "on"),
+                                                                       int(body.get("brightness") or -1), body.get("color", ""))})
+            elif parsed.path == "/api/ask":
+                res = run_agent(str(body.get("text", "")), source="painel")
+                if body.get("speak", True):
+                    speak_on_device(res["reply"])
+                self._send_json({"ok": True, **res})
             else:
                 self._send_json({"ok": True, "settings": update_settings(body)})
             return
@@ -3392,6 +4125,11 @@ class JarvisBridgeHandler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "8080"))
+    if not PANEL_PASSWORD:
+        print("⚠️  PANEL_PASSWORD nao definida: painel SEM senha (use so na rede local!)")
+    if not DEVICE_TOKEN:
+        print("⚠️  DEVICE_TOKEN nao definido: rotas do ESP32 abertas (use so na rede local!)")
+    os.makedirs(DATA_DIR, exist_ok=True)
     server = ThreadedHTTPServer(("0.0.0.0", port), JarvisBridgeHandler)
     print("=================================================================")
     print(f"🚀 J.A.R.V.I.S. EXTERNAL BRIDGE SERVER INICIADO NA PORTA {port}")

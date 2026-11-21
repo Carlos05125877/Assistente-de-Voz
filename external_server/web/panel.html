@@ -99,6 +99,7 @@
       <span class="chip"><span class="dot" id="dYv"></span>YouVersion</span>
       <span class="chip"><span class="dot" id="dSp"></span>Spotify</span>
       <span class="chip mono" id="cClock">--:--</span>
+      <a class="chip" href="/logout" style="text-decoration:none">Sair</a>
     </div>
 
     <!-- ================= VISAO GERAL ================= -->
@@ -220,7 +221,7 @@
             <button class="btn" onclick="esp({type:'ask',text:'Liga a luz da sala'})">💡 Luz da sala</button>
             <button class="btn danger" onclick="if(confirm('Reiniciar o ESP32?'))esp({type:'restart'})">⟲ Reiniciar ESP32</button>
           </div>
-          <div class="hint">Se o ESP32 não responder na hora, o comando fica na fila e é entregue no próximo heartbeat (até ~15 s).</div>
+          <div class="hint">O ESP32 mantém uma conexão aberta com o servidor (long-poll) e recebe os comandos na hora; se estiver ocupado falando, executa logo em seguida.</div>
         </div>
       </div>
     </section>
@@ -398,7 +399,7 @@ som"></textarea>
     <section id="alarms">
       <div class="grid two">
         <div class="card">
-          <h3>Alarmes salvos no ESP32 (NVS)</h3>
+          <h3>Alarmes <span class="r small muted">servidor + cópia no ESP32 para tocar offline</span></h3>
           <ul class="list" id="aList"></ul>
           <div class="row">
             <input type="time" id="aTime" value="07:00">
@@ -440,7 +441,7 @@ som"></textarea>
           <div class="row"><span class="small muted" style="width:120px">Seu nome</span><input class="grow" id="cfg_user_name" placeholder="Como o Jarvis te chama (vazio = senhor)"></div>
           <div class="row"><span class="small muted" style="width:120px">Cidade (clima)</span><input class="grow" id="cfg_city"></div>
           <div class="row"><span class="small muted" style="width:120px">Lat / Lon</span><input class="grow" id="cfg_latitude"><input class="grow" id="cfg_longitude"></div>
-          <div class="row"><span class="small muted" style="width:120px">IP do ESP32</span><input class="grow" id="cfg_esp_ip" placeholder="vazio = automatico (heartbeat)"></div>
+          <div class="row"><span class="small muted" style="width:120px">IP do ESP32</span><input class="grow" id="cfg_esp_ip" placeholder="so se o servidor estiver na mesma rede (vazio = long-poll)"></div>
           <div style="margin-top:12px" class="small muted">O briefing inclui:</div>
           <label class="toggle"><input type="checkbox" id="cfg_briefing_weather">Clima</label>
           <label class="toggle"><input type="checkbox" id="cfg_briefing_alarms">Próximos alarmes</label>
@@ -459,6 +460,25 @@ som"></textarea>
           </div>
           <div class="reader small" id="cBrief" style="display:none;margin-top:10px"></div>
         </div>
+        <div class="card">
+          <h3>Chaves de API <span class="r small muted">ficam só no servidor</span></h3>
+          <div class="row"><span class="small muted" style="width:130px">Groq (voz → texto)</span><input class="grow" type="password" id="sec_groq_api_key"></div>
+          <div class="row"><span class="small muted" style="width:130px">Gemini (IA)</span><input class="grow" type="password" id="sec_gemini_api_key"></div>
+          <div class="row"><span class="small muted" style="width:130px">Modelo Gemini</span><input class="grow" id="sec_gemini_model"></div>
+          <div class="row"><span class="small muted" style="width:130px">Modelo Whisper</span><input class="grow" id="sec_stt_model"></div>
+          <div class="row"><span class="small muted" style="width:130px">Tuya Access ID</span><input class="grow" type="password" id="sec_tuya_access_id"></div>
+          <div class="row"><span class="small muted" style="width:130px">Tuya Secret</span><input class="grow" type="password" id="sec_tuya_access_secret"></div>
+          <div class="row"><span class="small muted" style="width:130px">Tuya host</span><input class="grow" id="sec_tuya_host" placeholder="openapi.tuyaus.com"></div>
+          <div class="row"><span class="small muted" style="width:130px">Webhook casa</span><input class="grow" id="sec_smart_webhook_url" placeholder="opcional (Home Assistant etc.)"></div>
+          <div class="row"><button class="btn pri" onclick="saveSecrets()">Salvar chaves</button><span class="small muted">Campos vazios mantêm o valor atual.</span></div>
+        </div>
+        <div class="card">
+          <h3>Casa inteligente (SmartLife / Tuya)</h3>
+          <ul class="list" id="smList"></ul>
+          <div class="row"><input class="grow" id="smName" placeholder="Nome falado (ex: luz da sala)"><input class="grow" id="smAlias" placeholder="Apelidos (sala, lâmpada)"></div>
+          <div class="row"><input class="grow" id="smId" placeholder="Device ID da Tuya"><select id="smCode"><option>switch_led</option><option>switch_1</option><option>switch</option></select><label class="toggle small"><input type="checkbox" id="smRgb">RGB</label><button class="btn pri" onclick="addDevice()">Adicionar</button></div>
+        </div>
+
         <div class="card">
           <h3>Servidor</h3>
           <div class="kv" id="sysKv"></div>
@@ -505,7 +525,11 @@ async function esp(cmd){
   else if(d) toast(d.error||'Falha', true);
 }
 const espBible = action => esp({type:'bible', action});
-function askFrom(id){ const t=val(id); if(!t) return; $(id).value=''; esp({type:'ask', text:t}); }
+async function askFrom(id){
+  const t=val(id); if(!t) return; $(id).value=''; toast('Pensando...');
+  const d = await post('/api/ask', {text:t, speak:true});
+  if(d){ toast('Jarvis: '+d.reply.slice(0,160)); refresh(); }
+}
 function sayEsp(){ const t=val('vSay'); if(!t) return toast('Digite um texto', true); esp({type:'speak', text:t}); }
 function sayKeyEsp(){ esp({type:'say_key', key:readerKey, text: ($('rText').innerText||'').slice(0,280)}); }
 function timer(sec, label){ sec=parseInt(sec,10); if(!sec) return; esp({type:'timer', sec, label: label||('timer de '+Math.round(sec/60)+' minutos')}); }
@@ -565,6 +589,21 @@ async function loadPassage(){
 async function activatePlan(id){ const d=await api('/api/bible/youversion?action=start_plan&plan='+encodeURIComponent(id)); if(d){ toast('Plano ativo: '+(d.plan_title||'')); refresh(); } }
 function readPlanDay(id, day){ $('rPlan').value=id; $('rDay').value=day; loadReader(); $('rText').scrollIntoView({behavior:'smooth'}); }
 
+// ---------- chaves e casa
+const SECS=['groq_api_key','gemini_api_key','gemini_model','stt_model','tuya_access_id','tuya_access_secret','tuya_host','smart_webhook_url'];
+function fillSecrets(sv){ SECS.forEach(k=>{ const el=$('sec_'+k); if(!el||document.activeElement===el||el.dataset.dirty) return; const v=sv[k]||{}; if(el.type==='password'){ el.value=''; el.placeholder = v.set ? 'configurada ('+v.value+')' : 'não configurada'; } else el.value=v.value||''; }); }
+SECS.forEach(k=>{ const el=$('sec_'+k); if(el) el.oninput=()=>el.dataset.dirty='1'; });
+async function saveSecrets(){ const b={}; SECS.forEach(k=>{ const el=$('sec_'+k); if(el.dataset.dirty){ b[k]=el.value.trim(); delete el.dataset.dirty; } }); const d=await post('/api/secrets', b); if(d){ toast('Chaves salvas'); refresh(); } }
+function renderDevices(){
+  const devs=S.smart_devices||[];
+  $('smList').innerHTML = devs.map((d,i)=>`<li><div class="grow"><b>${esc(d.name)}</b><div class="small muted">${esc(d.aliases||'')} · ${esc(d.device_id||'sem ID')} · ${esc(d.switch_code)}${d.rgb?' · RGB':''}</div></div>
+    <button class="btn sm" onclick="smartCtl(${i},'on')">Ligar</button><button class="btn sm" onclick="smartCtl(${i},'off')">Desligar</button><button class="btn sm danger" onclick="delDevice(${i})">✕</button></li>`).join('') || '<li class="muted">Nenhum dispositivo. Por voz: "Jarvis, liga a luz da sala".</li>';
+}
+async function saveDevices(devs){ const d=await post('/api/smart/devices',{devices:devs}); if(d){ S.smart_devices=d.devices; renderDevices(); } }
+function addDevice(){ const n=val('smName'); if(!n) return toast('Dê um nome', true); saveDevices([...(S.smart_devices||[]), {name:n, aliases:val('smAlias'), device_id:val('smId'), switch_code:$('smCode').value, rgb:$('smRgb').checked}]); ['smName','smAlias','smId'].forEach(i=>$(i).value=''); }
+function delDevice(i){ const d=[...S.smart_devices]; d.splice(i,1); saveDevices(d); }
+async function smartCtl(i, state){ const d=await post('/api/smart/control',{name:S.smart_devices[i].name, state}); if(d) toast(d.message); }
+
 // ---------- configuracoes
 const CFG=['user_name','city','latitude','longitude','esp_ip','briefing_weather','briefing_alarms','briefing_plan','briefing_plan_full','briefing_verse','briefing_reminders','briefing_dates','briefing_quotes','briefing_news','news_topic'];
 function fillSettings(st){ CFG.forEach(k=>{ const el=$('cfg_'+k); if(!el || document.activeElement===el) return; if(el.type==='checkbox') el.checked=!!st[k]; else el.value=st[k]??''; }); }
@@ -593,8 +632,8 @@ function render(){
 
   // ESP32
   $('hEspSeen').textContent = dev.last_seen_ago!=null ? 'visto há '+dev.last_seen_ago+' s' : '';
-  $('hEspKv').innerHTML = dev.ip ? `<span>IP</span><span class="mono">${esc(dev.ip)}</span><span>Uptime</span><span>${fmtUp(dev.uptime)}</span><span>RAM</span><span>${dev.heap??'?'} KB (min ${dev.min_heap??'?'} KB)</span><span>WiFi</span><span>${dev.rssi??'?'} dBm</span><span>Firmware</span><span>${esc(dev.fw||'?')}${dev.busy?' · ocupado':''}</span>${dev.queue?`<span>Fila</span><span>${dev.queue} comando(s)</span>`:''}`
-                               : '<span>Status</span><span class="muted">Aguardando o primeiro heartbeat do ESP32. Grave o firmware novo e confira EXTERNAL_SERVER_URL.</span>';
+  $('hEspKv').innerHTML = dev.ip ? `<span>IP</span><span class="mono">${esc(dev.ip)}</span><span>Uptime</span><span>${fmtUp(dev.uptime)}</span><span>RAM</span><span>${dev.heap??'?'} KB (min ${dev.min_heap??'?'} KB)</span><span>WiFi</span><span>${dev.rssi??'?'} dBm</span><span>Firmware</span><span>${esc(dev.fw||'?')}${dev.busy?' · falando/ouvindo':''}</span>${dev.queue?`<span>Fila</span><span>${dev.queue} comando(s)</span>`:''}`
+                               : '<span>Status</span><span class="muted">Aguardando o ESP32 conectar. Confira JARVIS_SERVER_URL e JARVIS_DEVICE_TOKEN no secrets_local.h.</span>';
   $('hHeap').style.width = Math.min(100, (dev.heap||0)/320*100)+'%';
   $('hRssi').style.width = dev.rssi ? Math.max(0, Math.min(100, (dev.rssi+95)/60*100))+'%' : '0';
   if(document.activeElement!==$('hVol') && dev.volume!=null){ $('hVol').value=dev.volume; $('hVolL').textContent=dev.volume+'%'; }
@@ -612,8 +651,8 @@ function render(){
   const fmt = a => String(a.h).padStart(2,'0')+':'+String(a.m).padStart(2,'0');
   $('hAlarms').innerHTML = next.slice(0,4).map(a=>`<li><span class="mono" style="font-size:18px">${fmt(a)}</span><span class="grow">${esc(a.l)}</span><span class="tag">${a.r?'diário':'único'}</span></li>`).join('') || '<li class="muted">Nenhum alarme</li>';
   $('aList').innerHTML = al.map(a=>`<li><span class="mono" style="font-size:18px">${fmt(a)}</span><span class="grow">${esc(a.l)}</span><span class="tag">${a.r?'diário':'único'}</span><button class="btn sm danger" onclick="esp({type:'alarm_remove',h:${a.h},m:${a.m}})">Remover</button></li>`).join('') || '<li class="muted">Nenhum alarme salvo</li>';
-  $('tActive').textContent = dev.timers ? 'Timers ativos: '+dev.timers : '';
-  $('nList').innerHTML = dev.notes ? esc(dev.notes).split(/;\s*/).map(n=>'• '+n).join('<br>') : '<span class="muted">Lista vazia</span>';
+  $('tActive').innerHTML = (s.timers||[]).map(t=>`⏲ ${esc(t.label)} — ${Math.floor(Math.max(0,t.left)/60)}:${String(Math.max(0,t.left)%60).padStart(2,'0')}`).join('<br>') || '<span class="muted">Nenhum timer ativo</span>';
+  $('nList').innerHTML = (s.notes||[]).length ? s.notes.map(n=>'• '+esc(n)).join('<br>') : '<span class="muted">Lista vazia</span>';
 
   // conversas
   const conv = s.conversations||[];
@@ -645,7 +684,7 @@ function render(){
 
   // voz / config
   const vs=$('vVoice'); if(!vs.options.length){ vs.innerHTML=(s.voices||[]).map(v=>`<option value="${v.id}">${esc(v.label)}</option>`).join(''); vs.value=s.settings.voice; $('vRate').value=s.settings.rate; }
-  fillSettings(s.settings);
+  fillSettings(s.settings); fillSecrets(s.secrets||{}); renderDevices();
   $('sysKv').innerHTML = `<span>Hora do servidor</span><span>${esc(s.server.time)}</span><span>Uptime</span><span>${fmtUp(s.server.uptime)}</span><span>Voz</span><span>${esc(s.settings.voice)} (${esc(s.settings.rate)})</span><span>Histórico Bíblia</span><span>${(s.bible_history||[]).map(h=>esc(h.reference)).join(', ')||'—'}</span>`;
 }
 async function refresh(){ const d=await api('/api/state'); if(d){ S=d; render(); } }

@@ -1,231 +1,309 @@
 /*
  * ============================================================================
- * J.A.R.V.I.S. — ASSISTENTE DE IA COMPLETO PARA ESP32 (ESP-WROOM-32 / ESP32S)
+ * J.A.R.V.I.S. — ESP-WROOM-32 THIN CLIENT
  * ============================================================================
- * Desenvolvido sob medida para:
- * - Placa: ESP32 WiFi + Bluetooth (ESP32S / ESP-WROOM-32 sem PSRAM)
- * - Audio: 2 Alto-Falantes I2S em Estereo Real (Canal L + Canal R) e 1 Microfone I2S
- * - Acionamento: Botao BOOT (GPIO 0), Botao Externo (GPIO 4), Painel Web HUD ou Serial
- *   (Sem sensor de distancia)
- * - IA: Google Gemini 2.5 Flash com Function Calling Nativo (4 Ferramentas Completas)
- * - Voz: Google Cloud STT (com VAD Inteligente) + Google Cloud Neural2 TTS Streaming
- * - Integracoes Completas:
- *     1. Spotify Web API (OAuth2 Refresh Token: Busca, Play, Pause, Next, Volume)
- *     2. App Biblia Sagrada (Leitura de capitulos, versiculos, Salmos e Versiculo do Dia)
- *     3. Guardiao de Alarmes Persistentes na NVS (HH:MM diarios/unicos) + Timers + Notas
- *     4. SmartLife / Tuya IoT Cloud (HMAC-SHA256 Nativo + Ponte Webhook)
- *     5. Servidor Externo Jarvis Bridge (Python FastAPI opcional para aliviar o ESP32)
- *     6. Painel Web HUD Embarcado (http://jarvis.local)
+ * O ESP32 e so "boca e ouvido": captura a voz, envia ao servidor, toca a resposta.
+ * Todo o resto (Groq Whisper, Gemini + ferramentas, Edge-TTS, Spotify, YouVersion,
+ * SmartLife, alarmes, lembretes, rotinas) roda em external_server/jarvis_bridge_server.py
+ * — no seu PC ou na nuvem (Fly.io).
+ *
+ * Conversa por voz = 1 requisicao: POST /api/voice (audio em chunks enquanto voce fala)
+ *                    -> resposta em PCM 16 kHz tocada enquanto chega.
+ * Comandos do painel = long-poll GET /api/device/poll (funciona atras do roteador).
+ * Sem o servidor: botao toca som de erro e os alarmes espelhados na NVS ainda tocam.
+ * Atualizacao do firmware pelo WiFi: ArduinoOTA (host "jarvis", senha OTA_PASSWORD).
  * ============================================================================
  */
-
 #include <Arduino.h>
 #include <WiFi.h>
-#include <WiFiClientSecure.h>
-#include "esp_task_wdt.h"
+#include <ESPmDNS.h>
+#include <WebServer.h>
+#include <ArduinoOTA.h>
+#include <Preferences.h>
+#include <ArduinoJson.h>
+#include <time.h>
+#include "config.h"
+#include "audio_io.h"
+#include "server_link.h"
 
-#include "config_private.h"
-#include "audio_manager.h"
-#include "spotify_client.h"
-#include "smartlife_tuya.h"
-#include "bible_client.h"
-#include "jarvis_features.h"
-#include "gemini_agent.h"
-#include "web_portal.h"
+AudioIO audio;
+ServerLink link;
+WebServer web(80);          // so para a rede local (push direto e pagina de status)
+Preferences prefs;
 
-// ==== INSTANCIAS GLOBAIS DOS MODULOS ====
-// Usamos um unico WiFiClientSecure compartilhado para economizar ~80 KB de RAM
-// no ESP-WROOM-32 (evita crash de heap causado por multiplas conexoes TLS simultaneas)
-WiFiClientSecure sharedTlsClient;
-AudioManager     audio;
-SpotifyClient    spotify;
-SmartLifeClient  smartlife;
-BibleClient      bible;
-JarvisFeatures   jarvis;
-GeminiAgent      gemini;
-JarvisWebPortal  webPortal;
+// ---------------------------------------------------------------- fila de comandos
+struct Cmd { String type, key, mode; int v = -1; };
+static const int QMAX = 8;
+Cmd queueBuf[QMAX];
+int qHead = 0, qCount = 0;
+bool listenRequested = false;
 
-uint32_t cooldownUntil = 0;
+void enqueue(const String& type, const String& key, const String& mode, int v) {
+  if (type == "listen") { listenRequested = true; return; }
+  if (qCount >= QMAX || type.length() == 0) return;
+  Cmd& c = queueBuf[(qHead + qCount) % QMAX];
+  c.type = type; c.key = key; c.mode = mode; c.v = v;
+  qCount++;
+}
 
-// ==== CONEXAO WIFI OTIMIZADA PARA ESP-WROOM-32 ====
+// ---------------------------------------------------------------- alarmes offline (espelho da NVS)
+struct MiniAlarm { uint8_t h, m, r; };
+MiniAlarm alarms[12];
+int alarmCount = 0;
+String alarmsRev = "";
+int lastAlarmFiredMinute = -1;
+uint32_t lastServerOk = 0;
+
+void loadAlarms() {
+  alarmsRev = prefs.getString("al_rev", "");
+  String raw = prefs.getString("al", "");
+  alarmCount = 0;
+  for (int i = 0; i + 2 < (int)raw.length() && alarmCount < 12; i += 3) {
+    alarms[alarmCount++] = {(uint8_t)raw[i], (uint8_t)raw[i + 1], (uint8_t)raw[i + 2]};
+  }
+}
+
+void saveAlarms(JsonArray arr, const String& rev) {
+  String raw;
+  alarmCount = 0;
+  for (JsonArray a : arr) {
+    if (alarmCount >= 12) break;
+    alarms[alarmCount] = {(uint8_t)(int)a[0], (uint8_t)(int)a[1], (uint8_t)(int)a[2]};
+    raw += (char)alarms[alarmCount].h; raw += (char)alarms[alarmCount].m; raw += (char)alarms[alarmCount].r;
+    alarmCount++;
+  }
+  alarmsRev = rev;
+  prefs.putString("al", raw);
+  prefs.putString("al_rev", rev);
+  Serial.printf("⏰ Espelho de alarmes atualizado (%d)\n", alarmCount);
+}
+
+// So toca sozinho se o servidor estiver fora ha mais de 90 s (senao quem toca e o servidor, com voz)
+void checkOfflineAlarms() {
+  static uint32_t lastCheck = 0;
+  if (millis() - lastCheck < 2000) return;
+  lastCheck = millis();
+  if (millis() - lastServerOk < 90000 || alarmCount == 0) return;
+  struct tm t;
+  if (!getLocalTime(&t, 10)) return;
+  int minuteOfDay = t.tm_hour * 60 + t.tm_min;
+  if (minuteOfDay == lastAlarmFiredMinute) return;
+  for (int i = 0; i < alarmCount; ++i) {
+    if (alarms[i].h == t.tm_hour && alarms[i].m == t.tm_min) {
+      lastAlarmFiredMinute = minuteOfDay;
+      Serial.println("⏰ Alarme offline (servidor indisponivel)");
+      for (int k = 0; k < 10 && !AudioIO::buttonPressed(); ++k) { audio.alarm(); delay(400); }
+      return;
+    }
+  }
+}
+
+// ---------------------------------------------------------------- conversa por voz
+// typed != "" -> envia texto (Monitor Serial) em vez do microfone.
+void converse(String typed = "") {
+  for (int turn = 0; turn < 3; ++turn) {
+    WiFiClient* c = link.connect();
+    if (!c) { Serial.println("❌ Servidor indisponivel"); audio.error(); return; }
+    HttpHead h;
+    if (typed.length() > 0) {
+      link.writeHead(*c, "POST", "/api/voice/text",
+                     (String("Content-Type: text/plain; charset=utf-8\r\nContent-Length: ") + typed.length() + "\r\n").c_str());
+      c->print(typed);
+    } else {
+      link.writeHead(*c, "POST", "/api/voice", "Content-Type: audio/L16; rate=16000; channels=1\r\nTransfer-Encoding: chunked\r\n");
+      audio.chime();
+      Serial.println("🎙️ Ouvindo...");
+      bool speech = audio.captureChunked(*c);
+      c->print("0\r\n\r\n");
+      audio.blip();
+      if (!speech) Serial.println("… nenhuma voz detectada");
+    }
+    const uint32_t t0 = millis();
+    if (!ServerLink::readHead(*c, h, 45000)) { audio.error(); link.close(); return; }
+    lastServerOk = millis();
+    Serial.printf("⚡ Resposta HTTP %d em %u ms\n", h.status, (unsigned)(millis() - t0));
+    if (h.status == 200) audio.playStream(*c, h.length);
+    else if (h.status == 204) audio.noSpeech();
+    else audio.error();
+    link.close();
+    if (!h.listenAgain) return;
+    typed = "";                     // o Jarvis fez uma pergunta: ouve de novo
+  }
+}
+
+// Toca um audio guardado no servidor (/api/tts?key=...): avisos, lembretes, alarmes, painel.
+void playKey(const String& key) {
+  WiFiClient* c = link.connect();
+  if (!c) { audio.error(); return; }
+  link.writeHead(*c, "GET", "/api/tts?key=" + key);
+  HttpHead h;
+  if (ServerLink::readHead(*c, h, 45000) && h.status == 200) audio.playStream(*c, h.length);
+  link.close();
+}
+
+void runCommand(const Cmd& c) {
+  Serial.printf("🛰️ Comando: %s\n", c.type.c_str());
+  if (c.type == "play" && c.key.length()) playKey(c.key);
+  else if (c.type == "tone") audio.playMode(c.mode);
+  else if (c.type == "volume" && c.v >= 0) { audio.setVolume(c.v); prefs.putInt("vol", audio.volume); audio.ok(); }
+  else if (c.type == "restart") { audio.ok(); delay(200); ESP.restart(); }
+}
+
+// ---------------------------------------------------------------- long-poll (comandos do painel)
+enum PollState { POLL_IDLE, POLL_WAITING };
+PollState pollState = POLL_IDLE;
+uint32_t pollStarted = 0, nextPollAt = 0;
+int pollFails = 0;
+bool busy = false;
+
+void pollTick() {
+  if (WiFi.status() != WL_CONNECTED) return;
+  WiFiClient* c = link.current();
+  if (pollState == POLL_IDLE) {
+    if ((int32_t)(millis() - nextPollAt) < 0) return;
+    c = link.connect();
+    if (!c) {
+      pollFails++;
+      nextPollAt = millis() + (pollFails > 3 ? 60000UL : 5000UL);
+      return;
+    }
+    char q[200];
+    snprintf(q, sizeof(q), "/api/device/poll?wait=25&heap=%u&min_heap=%u&rssi=%d&uptime=%lu&volume=%d&busy=%d&fw=%s&ip=%s&alarms_rev=%s",
+             (unsigned)(ESP.getFreeHeap() / 1024), (unsigned)(ESP.getMinFreeHeap() / 1024), WiFi.RSSI(),
+             (unsigned long)(millis() / 1000), audio.volume, busy ? 1 : 0, JARVIS_FW_VERSION,
+             WiFi.localIP().toString().c_str(), alarmsRev.c_str());
+    link.writeHead(*c, "GET", q);
+    pollState = POLL_WAITING;
+    pollStarted = millis();
+    return;
+  }
+  // POLL_WAITING: nao bloqueia o loop — so le quando a resposta chegar
+  if (c->available()) {
+    HttpHead h;
+    String body;
+    if (ServerLink::readHead(*c, h, 5000) && h.status == 200) body = ServerLink::readBody(*c, h.length);
+    link.close();
+    pollState = POLL_IDLE;
+    if (h.status == 200) {
+      pollFails = 0;
+      lastServerOk = millis();
+      nextPollAt = millis() + 50;
+      DynamicJsonDocument doc(3072);
+      if (!deserializeJson(doc, body)) {
+        for (JsonObject o : doc["commands"].as<JsonArray>()) {
+          enqueue(o["type"] | "", o["key"] | "", o["mode"] | "", o["v"] | -1);
+        }
+        if (doc.containsKey("alarms")) saveAlarms(doc["alarms"].as<JsonArray>(), doc["alarms_rev"] | "");
+      }
+    } else {
+      pollFails++;
+      nextPollAt = millis() + (h.status == 401 ? 300000UL : 5000UL);   // 401 = DEVICE_TOKEN errado
+      if (h.status == 401) Serial.println("❌ Token do dispositivo recusado (JARVIS_DEVICE_TOKEN)");
+    }
+  } else if (!c->connected() || millis() - pollStarted > 40000) {
+    link.close();
+    pollState = POLL_IDLE;
+    nextPollAt = millis() + 2000;
+  }
+}
+
+void stopPoll() {
+  if (pollState == POLL_WAITING) { link.close(); pollState = POLL_IDLE; }
+  nextPollAt = millis() + 100;
+}
+
+// ---------------------------------------------------------------- setup / loop
 void connectWiFi() {
   WiFi.mode(WIFI_STA);
-  WiFi.setSleep(false); // Desativa modem-sleep para menor latencia de audio streaming
+  WiFi.setHostname(HOSTNAME_MDNS);
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-
-  Serial.printf("📡 [WiFi] Conectando a '%s'", WIFI_SSID);
-  uint32_t start = millis();
-  while (WiFi.status() != WL_CONNECTED && (millis() - start < 20000)) {
-    digitalWrite(PIN_STATUS_LED, !digitalRead(PIN_STATUS_LED));
-    delay(250);
-    Serial.print(".");
-  }
-  digitalWrite(PIN_STATUS_LED, LOW);
-
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("\n❌ [WiFi] Nao foi possivel conectar! Verifique WIFI_SSID e WIFI_PASSWORD em config_private.h");
-    return;
-  }
-
-  Serial.printf("\n✅ [WiFi] Conectado! IP: %s | Sinal: %d dBm\n",
-                WiFi.localIP().toString().c_str(), WiFi.RSSI());
+  Serial.print("📶 WiFi");
+  for (int i = 0; i < 60 && WiFi.status() != WL_CONNECTED; ++i) { delay(250); Serial.print('.'); }
+  Serial.printf("\n📶 %s  IP %s\n", WiFi.status() == WL_CONNECTED ? "conectado" : "FALHOU", WiFi.localIP().toString().c_str());
 }
 
-// ==== CICLO COMPLETO DE CONVERSA POR VOZ (STT -> GEMINI TOOLS -> TTS ESTEREO) ====
-void runVoiceAssistantRound() {
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("⚠️ [Jarvis] WiFi desconectado. Tentando reconectar...");
-    connectWiFi();
-    if (WiFi.status() != WL_CONNECTED) return;
-  }
-
-  uint32_t tStart = millis();
-  Serial.println("\n=======================================================");
-  Serial.printf("🚀 [Jarvis] Iniciando captura de voz (RAM Livre: %u bytes)\n", ESP.getFreeHeap());
-
-  // 1. Escuta o microfone com VAD inteligente e transcreve via Google STT
-  String transcript;
-  if (!audio.listenAndTranscribe(sharedTlsClient, transcript)) {
-    Serial.println("⚠️ [Jarvis] Nenhuma fala reconhecida.");
-    return;
-  }
-
-  Serial.printf("📝 [Voce disse]: \"%s\"\n", transcript.c_str());
-  webPortal.lastUserText = transcript;
-
-  // 2. Processa com Gemini 2.5 Flash + Function Calling (Spotify / Biblia / Alarmes / SmartLife)
-  String reply;
-  Serial.println("🧠 [Gemini] Analisando intencao e executando ferramentas...");
-  if (!gemini.processUserQuery(sharedTlsClient, transcript, reply,
-                               audio, spotify, smartlife, bible, jarvis)) {
-    reply = "Perdao senhor, tive uma instabilidade ao processar sua solicitacao.";
-  }
-
-  Serial.printf("🤖 [Jarvis]: \"%s\"\n", reply.c_str());
-  webPortal.lastJarvisReply = reply;
-
-  // 3. Sintetiza resposta por voz (Google Neural2 TTS) em streaming nos 2 alto-falantes
-  audio.speakText(sharedTlsClient, reply);
-
-  Serial.printf("⚡ [Jarvis] Ciclo completo finalizado em %u ms | RAM Livre: %u bytes\n",
-                millis() - tStart, ESP.getFreeHeap());
-  Serial.println("=======================================================\n");
-}
-
-// ==== PROCESSA COMANDO DIGITADO NO MONITOR SERIAL ====
-void runTextCommandRound(const String& commandText) {
-  Serial.printf("\n⌨️ [Comando Texto]: \"%s\"\n", commandText.c_str());
-  webPortal.lastUserText = commandText;
-
-  String reply;
-  if (gemini.processUserQuery(sharedTlsClient, commandText, reply,
-                               audio, spotify, smartlife, bible, jarvis)) {
-    Serial.printf("🤖 [Jarvis]: \"%s\"\n", reply.c_str());
-    webPortal.lastJarvisReply = reply;
-    audio.speakText(sharedTlsClient, reply);
-  } else {
-    Serial.println("❌ [Gemini] Falha ao processar comando de texto.");
-  }
+void setupWeb() {
+  web.on("/", HTTP_GET, []() {
+    String h = String("<html><meta charset=utf-8><body style='font-family:sans-serif;background:#060a12;color:#e3eefc'>"
+                      "<h2>J.A.R.V.I.S. ESP32 ") + JARVIS_FW_VERSION + "</h2><p>RAM livre: " + (ESP.getFreeHeap() / 1024) +
+               " KB · WiFi " + WiFi.RSSI() + " dBm · volume " + audio.volume + "%</p><p>Painel completo: <a style='color:#34e4ff' href='" +
+               JARVIS_SERVER_URL + "'>" + JARVIS_SERVER_URL + "</a></p></body></html>";
+    web.send(200, "text/html", h);
+  });
+  web.on("/api/queue", HTTP_GET, []() {       // push direto do servidor na rede local (opcional)
+    String ip = web.client().remoteIP().toString();
+    bool lan = ip.startsWith("192.168.") || ip.startsWith("10.") || ip.startsWith("172.");
+    if (strlen(JARVIS_DEVICE_TOKEN) > 0 && !lan && web.arg("token") != JARVIS_DEVICE_TOKEN) {
+      web.send(401, "application/json", "{\"ok\":false}");
+      return;
+    }
+    enqueue(web.arg("type"), web.arg("key"), web.arg("mode"), web.hasArg("v") ? web.arg("v").toInt() : -1);
+    web.send(200, "application/json", "{\"ok\":true}");
+  });
+  web.begin();
 }
 
 void setup() {
   Serial.begin(115200);
-  delay(400);
-
-  setCpuFrequencyMhz(240);
-
-  pinMode(PIN_STATUS_LED, OUTPUT);
-  digitalWrite(PIN_STATUS_LED, LOW);
   pinMode(PIN_WAKE_BUTTON, INPUT_PULLUP);
   pinMode(PIN_EXTERNAL_BTN, INPUT_PULLUP);
-
-  // Configura Watchdog tolerante a streaming de audio
-  esp_task_wdt_config_t wdt_config = {
-    .timeout_ms = 30000,
-    .idle_core_mask = 0,
-    .trigger_panic = false
-  };
-  esp_task_wdt_init(&wdt_config);
-
-  Serial.println("\n=======================================================");
-  Serial.println("🤖 J.A.R.V.I.S. AI ASSISTANT — ESP-WROOM-32 EDITION");
-  Serial.println("=======================================================");
-  Serial.printf("⚡ CPU: %u MHz | RAM Livre: %u KB | Flash: %u MB\n",
-                getCpuFrequencyMhz(),
-                ESP.getFreeHeap() / 1024,
-                ESP.getFlashChipSize() / (1024 * 1024));
-
-  // 1. Inicializa Audio I2S (1 Microfone + 2 Alto-falantes Estereo)
-  if (!audio.begin()) {
-    Serial.println("❌ Erro critico no subsistema de audio. Reiniciando...");
-    delay(3000);
-    ESP.restart();
-  }
-
-  // Efeito sonoro de inicializacao nos 2 alto-falantes (Esquerdo -> Direito)
-  audio.playWakeChime();
-
-  // 2. Conecta ao WiFi
+  pinMode(PIN_STATUS_LED, OUTPUT);
+  prefs.begin("jarvis", false);
+  audio.begin();
+  audio.setVolume(prefs.getInt("vol", DEFAULT_VOLUME_PCT));
+  audio.chime();
+  loadAlarms();
   connectWiFi();
-
-  // 3. Inicializa Relogio NTP, Alarmes Persistentes (NVS), Planos do App Biblia (YouVersion NVS), Timers e Notas
-  jarvis.begin();
-  bible.begin();
-
-  // 4. Inicializa Painel Web HUD (http://jarvis.local)
-  if (WiFi.status() == WL_CONNECTED) {
-    webPortal.begin(audio, spotify, smartlife, bible, jarvis, gemini, sharedTlsClient);
-  }
-
-  Serial.println("\n✅ J.A.R.V.I.S. ONLINE E PRONTO!");
-  Serial.println("👉 Como acionar:");
-  Serial.println("   1. Pressione o botao BOOT (GPIO 0) ou botao externo (GPIO 4) para falar");
-  Serial.println("   2. Digite ENTER no Monitor Serial para falar, ou digite uma frase + ENTER");
-  Serial.printf ("   3. Acesse http://%s.local ou http://%s no navegador\n\n",
-                 HOSTNAME_MDNS, WiFi.localIP().toString().c_str());
+  configTzTime(NTP_TZ, "pool.ntp.org", "a.st1.ntp.br");
+  link.begin();
+  MDNS.begin(HOSTNAME_MDNS);
+  ArduinoOTA.setHostname(HOSTNAME_MDNS);
+  ArduinoOTA.setPassword(OTA_PASSWORD);
+  ArduinoOTA.begin();
+  setupWeb();
+  Serial.printf("✅ J.A.R.V.I.S. thin client %s | servidor %s | RAM livre %u KB\n",
+                JARVIS_FW_VERSION, JARVIS_SERVER_URL, (unsigned)(ESP.getFreeHeap() / 1024));
+  Serial.println("👉 Botao BOOT/GPIO4 para falar | ENTER no Serial = microfone | texto + ENTER = pergunta digitada");
 }
 
 void loop() {
-  // 1. Atende requisicoes do Painel Web HUD
-  webPortal.handleClient();
+  ArduinoOTA.handle();
+  web.handleClient();
 
-  // 2. Verifica se o microfone foi acionado pelo Painel Web
-  if (webPortal.remoteMicTriggered) {
-    webPortal.remoteMicTriggered = false;
-    runVoiceAssistantRound();
-    cooldownUntil = millis() + 1500;
+  if (WiFi.status() != WL_CONNECTED) {
+    static uint32_t lastTry = 0;
+    if (millis() - lastTry > 10000) { lastTry = millis(); WiFi.reconnect(); }
   }
 
-  // 2b. Executa comandos da fila (HUD / Painel de Controle no PC) e envia heartbeat ao Bridge
-  webPortal.processQueue();
-  webPortal.tickHeartbeat();
-
-  // 3. Verifica Timers Regressivos e Alarmes Despertadores (HH:MM) salvos na NVS
-  jarvis.checkTimersAndAlarms(audio, sharedTlsClient);
-
-  // 4. Verifica Botao Fisico (BOOT GPIO 0 ou Botao Externo GPIO 4)
-  if (millis() >= cooldownUntil) {
-    if (digitalRead(PIN_WAKE_BUTTON) == LOW || digitalRead(PIN_EXTERNAL_BTN) == LOW) {
-      delay(40); // Debounce
-      if (digitalRead(PIN_WAKE_BUTTON) == LOW || digitalRead(PIN_EXTERNAL_BTN) == LOW) {
-        Serial.println("🔘 [Trigger] Botao fisico pressionado!");
-        runVoiceAssistantRound();
-        cooldownUntil = millis() + 1500;
-      }
-    }
-  }
-
-  // 5. Verifica Monitor Serial (ENTER vazio = ativa microfone | texto + ENTER = envia texto ao Gemini)
+  bool pressed = AudioIO::buttonPressed();
+  if (pressed) { delay(40); pressed = AudioIO::buttonPressed(); }
+  String typed;
+  bool serialMic = false;
   if (Serial.available()) {
-    String line = Serial.readStringUntil('\n');
-    line.trim();
-    if (line.length() == 0) {
-      Serial.println("🎙️ [Trigger] Acionamento manual via Serial -> Microfone!");
-      runVoiceAssistantRound();
-    } else {
-      runTextCommandRound(line);
-    }
+    typed = Serial.readStringUntil('\n');
+    typed.trim();
+    serialMic = typed.length() == 0;
   }
 
-  delay(10);
+  if (pressed || listenRequested || serialMic || typed.length() > 0) {
+    listenRequested = false;
+    busy = true;
+    stopPoll();                     // uma conexao (TLS) por vez
+    converse(typed);
+    busy = false;
+    while (AudioIO::buttonPressed()) delay(10);
+  } else if (qCount > 0) {
+    Cmd c = queueBuf[qHead];
+    qHead = (qHead + 1) % QMAX;
+    qCount--;
+    busy = true;
+    stopPoll();
+    runCommand(c);
+    busy = false;
+  } else {
+    pollTick();
+  }
+
+  checkOfflineAlarms();
+  delay(5);
 }
