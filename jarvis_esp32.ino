@@ -1,246 +1,261 @@
 /*
  * ============================================================================
- * J.A.R.V.I.S. — ESP-WROOM-32 THIN CLIENT
+ * J.A.R.V.I.S. — ESP-WROOM-32 HIBRIDO (nucleo local) + Netlify (sob demanda)
  * ============================================================================
- * O ESP32 e so "boca e ouvido": captura a voz, envia ao servidor, toca a resposta.
- * Todo o resto (Groq Whisper, Gemini + ferramentas, Edge-TTS, Spotify, YouVersion,
- * SmartLife, alarmes, lembretes, rotinas) roda em external_server/jarvis_bridge_server.py
- * — no seu PC ou na nuvem (Fly.io).
+ * Fica SEMPRE no ESP32 (de graca, funciona sem internet):
+ *   botao, microfone, alto-falantes, alarmes, lembretes, timers, horarios das rotinas.
+ * Vai para a nuvem SO quando precisa:
+ *   voz -> texto ......... direto no Groq Whisper (upload enquanto voce fala)
+ *   IA + ferramentas ..... Netlify /api/turn (Gemini, YouVersion, Spotify, casa, clima...)
+ *   voz do Jarvis ........ MP3 24 kHz do Edge TTS, tocado enquanto chega (libhelix)
+ *   painel ............... Netlify; o ESP pega comandos no sync (3 min, ou 10 s com o painel aberto)
  *
- * Conversa por voz = 1 requisicao: POST /api/voice (audio em chunks enquanto voce fala)
- *                    -> resposta em PCM 16 kHz tocada enquanto chega.
- * Comandos do painel = long-poll GET /api/device/poll (funciona atras do roteador).
- * Sem o servidor: botao toca som de erro e os alarmes espelhados na NVS ainda tocam.
+ * Um turno de voz = Groq (texto) + 1 chamada ao Netlify. Textos longos chegam em partes
+ * pela mesma conexao TLS; o buffer de 40 KB toca uma parte enquanto baixa a proxima.
  * Atualizacao do firmware pelo WiFi: ArduinoOTA (host "jarvis", senha OTA_PASSWORD).
  * ============================================================================
  */
 #include <Arduino.h>
 #include <WiFi.h>
 #include <ESPmDNS.h>
-#include <WebServer.h>
 #include <ArduinoOTA.h>
 #include <Preferences.h>
 #include <ArduinoJson.h>
 #include <time.h>
 #include "config.h"
 #include "audio_io.h"
-#include "server_link.h"
+#include "net_link.h"
+#include "agenda.h"
 
 AudioIO audio;
-ServerLink link;
-WebServer web(80);          // so para a rede local (push direto e pagina de status)
+Netlify net;
+Agenda agenda;
 Preferences prefs;
 
-// ---------------------------------------------------------------- fila de comandos
-struct Cmd { String type, key, mode; int v = -1; };
-static const int QMAX = 8;
-Cmd queueBuf[QMAX];
-int qHead = 0, qCount = 0;
-bool listenRequested = false;
+uint32_t nextSyncAt = 5000, lastSyncOk = 0;
+int syncFails = 0;
+bool hot = false, busy = false, listenRequested = false, restartRequested = false;
 
-void enqueue(const String& type, const String& key, const String& mode, int v) {
-  if (type == "listen") { listenRequested = true; return; }
-  if (qCount >= QMAX || type.length() == 0) return;
-  Cmd& c = queueBuf[(qHead + qCount) % QMAX];
-  c.type = type; c.key = key; c.mode = mode; c.v = v;
-  qCount++;
+// ---------------------------------------------------------------- utilitarios
+static int b64val(char c) {
+  if (c >= 'A' && c <= 'Z') return c - 'A';
+  if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+  if (c >= '0' && c <= '9') return c - '0' + 52;
+  if (c == '-' || c == '+') return 62;
+  if (c == '_' || c == '/') return 63;
+  return -1;
+}
+String b64urlDecode(const String& in) {
+  String out;
+  uint32_t buf = 0;
+  int bits = 0;
+  for (size_t i = 0; i < in.length(); ++i) {
+    int v = b64val(in[i]);
+    if (v < 0) continue;
+    buf = (buf << 6) | v; bits += 6;
+    if (bits >= 8) { bits -= 8; out += (char)((buf >> bits) & 0xFF); }
+  }
+  return out;
+}
+String urlEncode(const String& s) {
+  String o;
+  const char* hex = "0123456789ABCDEF";
+  for (size_t i = 0; i < s.length(); ++i) {
+    uint8_t c = s[i];
+    if (isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') o += (char)c;
+    else { o += '%'; o += hex[c >> 4]; o += hex[c & 15]; }
+  }
+  return o;
+}
+void fillState(JsonObject st) {
+  agenda.toJson(st);
+  st["vol"] = audio.volume;
+  st["heap"] = ESP.getFreeHeap() / 1024;
+  st["minh"] = ESP.getMinFreeHeap() / 1024;
+  st["rssi"] = WiFi.RSSI();
+  st["up"] = millis() / 1000;
+  st["fw"] = JARVIS_FW_VERSION;
+  st["ip"] = WiFi.localIP().toString();
+  st["busy"] = busy;
 }
 
-// ---------------------------------------------------------------- alarmes offline (espelho da NVS)
-struct MiniAlarm { uint8_t h, m, r; };
-MiniAlarm alarms[12];
-int alarmCount = 0;
-String alarmsRev = "";
-int lastAlarmFiredMinute = -1;
-uint32_t lastServerOk = 0;
+// ---------------------------------------------------------------- acoes vindas do Netlify
+void sayParts(const String& id, int n);
 
-void loadAlarms() {
-  alarmsRev = prefs.getString("al_rev", "");
-  String raw = prefs.getString("al", "");
-  alarmCount = 0;
-  for (int i = 0; i + 2 < (int)raw.length() && alarmCount < 12; i += 3) {
-    alarms[alarmCount++] = {(uint8_t)raw[i], (uint8_t)raw[i + 1], (uint8_t)raw[i + 2]};
+void runAction(JsonObject a) {
+  if (agenda.apply(a)) { audio.ok(); return; }
+  const char* t = a["t"] | "";
+  if (!strcmp(t, "vol")) { audio.setVolume(a["v"] | DEFAULT_VOLUME_PCT); prefs.putInt("vol", audio.volume); audio.ok(); }
+  else if (!strcmp(t, "tone")) audio.playMode(a["m"] | "chime");
+  else if (!strcmp(t, "say")) sayParts(a["id"] | "", a["n"] | 1);
+  else if (!strcmp(t, "listen")) listenRequested = true;
+  else if (!strcmp(t, "restart")) restartRequested = true;
+}
+
+/** Aplica as acoes de um turno (vem no cabecalho X-Actions) antes de tocar a resposta. */
+void runActionsHeader(const String& b64) {
+  if (b64.length() < 3) return;
+  DynamicJsonDocument doc(3072);
+  if (deserializeJson(doc, b64urlDecode(b64))) return;
+  for (JsonObject a : doc.as<JsonArray>()) {
+    const char* t = a["t"] | "";
+    if (!strcmp(t, "say")) continue;               // a fala do turno ja vem no corpo
+    if (agenda.apply(a)) continue;                 // o "ok" sonoro fica por conta da resposta falada
+    runAction(a);
   }
 }
 
-void saveAlarms(JsonArray arr, const String& rev) {
-  String raw;
-  alarmCount = 0;
-  for (JsonArray a : arr) {
-    if (alarmCount >= 12) break;
-    alarms[alarmCount] = {(uint8_t)(int)a[0], (uint8_t)(int)a[1], (uint8_t)(int)a[2]};
-    raw += (char)alarms[alarmCount].h; raw += (char)alarms[alarmCount].m; raw += (char)alarms[alarmCount].r;
-    alarmCount++;
+// ---------------------------------------------------------------- fala
+/** Toca as partes `from`..n-1 de um texto guardado no Netlify (mesma conexao TLS). */
+bool playStoredParts(const String& id, int from, int n) {
+  for (int p = from; p < n; ++p) {
+    if (!net.request("GET", "/api/say?id=" + id + "&p=" + p)) return false;
+    Head h;
+    if (!net.readHead(h, 30000) || h.status != 200) { net.finish(); return false; }
+    if (!net.playBody(audio)) return false;           // botao interrompeu
   }
-  alarmsRev = rev;
-  prefs.putString("al", raw);
-  prefs.putString("al_rev", rev);
-  Serial.printf("⏰ Espelho de alarmes atualizado (%d)\n", alarmCount);
+  return true;
+}
+void sayParts(const String& id, int n) {
+  if (!id.length()) return;
+  audio.startSpeech();
+  if (playStoredParts(id, 0, n)) audio.drain(); else audio.abortPlayback();
+  if (!hot) net.close();
+}
+/** Fala um texto curto gerado no ESP (lembrete, timer). Sem internet: false. */
+bool speakText(const String& text) {
+  if (WiFi.status() != WL_CONNECTED) return false;
+  if (!net.request("GET", "/api/say?text=" + urlEncode(text))) return false;
+  Head h;
+  if (!net.readHead(h, 20000) || h.status != 200) { net.finish(); return false; }
+  audio.startSpeech();
+  bool ok = net.playBody(audio) && audio.drain();
+  if (!ok) audio.abortPlayback();
+  if (!hot) net.close();
+  return true;
 }
 
-// So toca sozinho se o servidor estiver fora ha mais de 90 s (senao quem toca e o servidor, com voz)
-void checkOfflineAlarms() {
-  static uint32_t lastCheck = 0;
-  if (millis() - lastCheck < 2000) return;
-  lastCheck = millis();
-  if (millis() - lastServerOk < 90000 || alarmCount == 0) return;
-  struct tm t;
-  if (!getLocalTime(&t, 10)) return;
-  int minuteOfDay = t.tm_hour * 60 + t.tm_min;
-  if (minuteOfDay == lastAlarmFiredMinute) return;
-  for (int i = 0; i < alarmCount; ++i) {
-    if (alarms[i].h == t.tm_hour && alarms[i].m == t.tm_min) {
-      lastAlarmFiredMinute = minuteOfDay;
-      Serial.println("⏰ Alarme offline (servidor indisponivel)");
-      for (int k = 0; k < 10 && !AudioIO::buttonPressed(); ++k) { audio.alarm(); delay(400); }
-      return;
-    }
-  }
+/** Um turno no Netlify. Retorna true se o Jarvis fez uma pergunta (ouvir de novo). */
+bool turn(const String& text) {
+  DynamicJsonDocument doc(4096);
+  doc["text"] = text;
+  fillState(doc.createNestedObject("st"));
+  String body;
+  serializeJson(doc, body);
+  doc.clear();
+  const uint32_t t0 = millis();
+  if (!net.request("POST", "/api/turn", "application/json", &body)) { audio.error(); return false; }
+  Head h;
+  if (!net.readHead(h, 45000)) { Serial.println("❌ Netlify não respondeu"); audio.error(); return false; }
+  Serial.printf("⚡ /api/turn HTTP %d em %u ms (%d partes)\n", h.status, (unsigned)(millis() - t0), h.parts);
+  lastSyncOk = millis();
+  runActionsHeader(h.actions);
+  if (h.status == 401) { Serial.println("❌ DEVICE_TOKEN recusado pelo Netlify"); audio.error(); net.finish(); return false; }
+  if (h.status == 204) { net.finish(); return false; }
+  if (h.status != 200) { net.finish(); audio.error(); return false; }
+  audio.startSpeech();
+  bool ok = net.playBody(audio) && playStoredParts(h.textId, 1, h.parts);
+  if (ok) ok = audio.drain(); else audio.abortPlayback();
+  if (!hot) net.close();
+  return ok && h.listen;
 }
 
-// ---------------------------------------------------------------- conversa por voz
-// typed != "" -> envia texto (Monitor Serial) em vez do microfone.
+/** Conversa: microfone -> Groq -> Netlify -> alto-falantes. typed != "" pula o microfone. */
 void converse(String typed = "") {
-  for (int turn = 0; turn < 3; ++turn) {
-    WiFiClient* c = link.connect();
-    if (!c) { Serial.println("❌ Servidor indisponivel"); audio.error(); return; }
-    HttpHead h;
-    if (typed.length() > 0) {
-      link.writeHead(*c, "POST", "/api/voice/text",
-                     (String("Content-Type: text/plain; charset=utf-8\r\nContent-Length: ") + typed.length() + "\r\n").c_str());
-      c->print(typed);
-    } else {
-      link.writeHead(*c, "POST", "/api/voice", "Content-Type: audio/L16; rate=16000; channels=1\r\nTransfer-Encoding: chunked\r\n");
-      audio.chime();
-      Serial.println("🎙️ Ouvindo...");
-      bool speech = audio.captureChunked(*c);
-      c->print("0\r\n\r\n");
-      audio.blip();
-      if (!speech) Serial.println("… nenhuma voz detectada");
+  busy = true;
+  for (int i = 0; i < 3; ++i) {
+    String text = typed;
+    if (!text.length()) {
+      net.close();                                  // libera a sessao TLS para o Groq
+      const uint32_t t0 = millis();
+      text = transcribeWithGroq(audio, agenda.groqKey, agenda.sttModel);
+      if (text == "#erro") { audio.error(); break; }
+      if (!text.length()) { audio.noSpeech(); break; }
+      Serial.printf("📝 Você (%u ms): %s\n", (unsigned)(millis() - t0), text.c_str());
     }
-    const uint32_t t0 = millis();
-    if (!ServerLink::readHead(*c, h, 45000)) { audio.error(); link.close(); return; }
-    lastServerOk = millis();
-    Serial.printf("⚡ Resposta HTTP %d em %u ms\n", h.status, (unsigned)(millis() - t0));
-    if (h.status == 200) audio.playStream(*c, h.length);
-    else if (h.status == 204) audio.noSpeech();
-    else audio.error();
-    link.close();
-    if (!h.listenAgain) return;
-    typed = "";                     // o Jarvis fez uma pergunta: ouve de novo
+    if (!turn(text)) break;
+    typed = "";                                     // o Jarvis perguntou algo: ouve de novo
   }
+  busy = false;
+  while (AudioIO::buttonPressed()) delay(10);
 }
 
-// Toca um audio guardado no servidor (/api/tts?key=...): avisos, lembretes, alarmes, painel.
-void playKey(const String& key) {
-  WiFiClient* c = link.connect();
-  if (!c) { audio.error(); return; }
-  link.writeHead(*c, "GET", "/api/tts?key=" + key);
-  HttpHead h;
-  if (ServerLink::readHead(*c, h, 45000) && h.status == 200) audio.playStream(*c, h.length);
-  link.close();
+// ---------------------------------------------------------------- eventos da agenda local
+void handleEvent(const Event& ev) {
+  busy = true;
+  if (ev.kind == EV_ALARM) {
+    Serial.printf("⏰ Alarme: %s\n", ev.text);
+    const uint32_t t0 = millis();
+    audio.startSpeech();
+    while (millis() - t0 < 60000 && !audio.interrupted()) { audio.alarm(); delay(350); }
+    while (AudioIO::buttonPressed()) delay(10);
+    if (ev.briefing) turn("__briefing__");          // devocional/briefing logo depois de acordar
+  } else if (ev.kind == EV_REMINDER) {
+    Serial.printf("🔔 Lembrete: %s\n", ev.text);
+    audio.bell();
+    if (!speakText(String("Lembrete: ") + ev.text + ".")) { delay(400); audio.bell(); }
+  } else if (ev.kind == EV_TIMER) {
+    Serial.printf("⏲️ Timer: %s\n", ev.text);
+    audio.alarm();
+    if (!speakText(String("O timer ") + ev.text + " terminou.")) audio.alarm();
+  } else if (ev.kind == EV_ROUTINE) {
+    Serial.printf("▶️ Rotina agendada: %s\n", ev.text);
+    turn(String("__routine:") + ev.text);
+  }
+  busy = false;
 }
 
-void runCommand(const Cmd& c) {
-  Serial.printf("🛰️ Comando: %s\n", c.type.c_str());
-  if (c.type == "play" && c.key.length()) playKey(c.key);
-  else if (c.type == "tone") audio.playMode(c.mode);
-  else if (c.type == "volume" && c.v >= 0) { audio.setVolume(c.v); prefs.putInt("vol", audio.volume); audio.ok(); }
-  else if (c.type == "restart") { audio.ok(); delay(200); ESP.restart(); }
-}
-
-// ---------------------------------------------------------------- long-poll (comandos do painel)
-enum PollState { POLL_IDLE, POLL_WAITING };
-PollState pollState = POLL_IDLE;
-uint32_t pollStarted = 0, nextPollAt = 0;
-int pollFails = 0;
-bool busy = false;
-
-void pollTick() {
-  if (WiFi.status() != WL_CONNECTED) return;
-  WiFiClient* c = link.current();
-  if (pollState == POLL_IDLE) {
-    if ((int32_t)(millis() - nextPollAt) < 0) return;
-    c = link.connect();
-    if (!c) {
-      pollFails++;
-      nextPollAt = millis() + (pollFails > 3 ? 60000UL : 5000UL);
-      return;
-    }
-    char q[200];
-    snprintf(q, sizeof(q), "/api/device/poll?wait=25&heap=%u&min_heap=%u&rssi=%d&uptime=%lu&volume=%d&busy=%d&fw=%s&ip=%s&alarms_rev=%s",
-             (unsigned)(ESP.getFreeHeap() / 1024), (unsigned)(ESP.getMinFreeHeap() / 1024), WiFi.RSSI(),
-             (unsigned long)(millis() / 1000), audio.volume, busy ? 1 : 0, JARVIS_FW_VERSION,
-             WiFi.localIP().toString().c_str(), alarmsRev.c_str());
-    link.writeHead(*c, "GET", q);
-    pollState = POLL_WAITING;
-    pollStarted = millis();
+// ---------------------------------------------------------------- sync com o Netlify
+void doSync() {
+  DynamicJsonDocument doc(4096);
+  fillState(doc.createNestedObject("st"));
+  String body;
+  serializeJson(doc, body);
+  doc.clear();
+  Head h;
+  String resp;
+  bool ok = net.request("POST", "/api/sync", "application/json", &body) && net.readHead(h, 20000);
+  if (ok) resp = net.readBody(6144);
+  if (!ok || h.status != 200) {
+    net.close();
+    syncFails++;
+    uint32_t wait = h.status == 401 ? 600 : min(60 * syncFails, 300);
+    if (h.status == 401) Serial.println("❌ DEVICE_TOKEN recusado pelo Netlify (confira secrets_local.h)");
+    nextSyncAt = millis() + wait * 1000UL;
+    hot = false;
     return;
   }
-  // POLL_WAITING: nao bloqueia o loop — so le quando a resposta chegar
-  if (c->available()) {
-    HttpHead h;
-    String body;
-    if (ServerLink::readHead(*c, h, 5000) && h.status == 200) body = ServerLink::readBody(*c, h.length);
-    link.close();
-    pollState = POLL_IDLE;
-    if (h.status == 200) {
-      pollFails = 0;
-      lastServerOk = millis();
-      nextPollAt = millis() + 50;
-      DynamicJsonDocument doc(3072);
-      if (!deserializeJson(doc, body)) {
-        for (JsonObject o : doc["commands"].as<JsonArray>()) {
-          enqueue(o["type"] | "", o["key"] | "", o["mode"] | "", o["v"] | -1);
-        }
-        if (doc.containsKey("alarms")) saveAlarms(doc["alarms"].as<JsonArray>(), doc["alarms_rev"] | "");
-      }
-    } else {
-      pollFails++;
-      nextPollAt = millis() + (h.status == 401 ? 300000UL : 5000UL);   // 401 = DEVICE_TOKEN errado
-      if (h.status == 401) Serial.println("❌ Token do dispositivo recusado (JARVIS_DEVICE_TOKEN)");
-    }
-  } else if (!c->connected() || millis() - pollStarted > 40000) {
-    link.close();
-    pollState = POLL_IDLE;
-    nextPollAt = millis() + 2000;
+  syncFails = 0;
+  lastSyncOk = millis();
+  agenda.dirty = false;
+  DynamicJsonDocument r(6144);
+  if (deserializeJson(r, resp)) { nextSyncAt = millis() + 60000; return; }
+  hot = r["hot"] | false;
+  nextSyncAt = millis() + (uint32_t)(r["next"] | SYNC_IDLE_S) * 1000UL;
+  if (!hot) net.close();                            // fora do modo painel, libera ~40 KB de RAM
+  if (r.containsKey("cfg")) agenda.applyConfig(r["cfg"].as<JsonObject>());
+  if (!agenda.timeValid() && r.containsKey("t")) {  // sem NTP ainda: usa a hora do Netlify
+    struct timeval tv = {(time_t)(r["t"].as<long>()), 0};
+    settimeofday(&tv, nullptr);
   }
-}
-
-void stopPoll() {
-  if (pollState == POLL_WAITING) { link.close(); pollState = POLL_IDLE; }
-  nextPollAt = millis() + 100;
+  JsonArray q = r["q"].as<JsonArray>();
+  if (q.size()) {
+    busy = true;
+    for (JsonObject a : q) { Serial.printf("🛰️ Painel: %s\n", (const char*)(a["t"] | "?")); runAction(a); }
+    busy = false;
+    nextSyncAt = millis() + 1500;                   // conta ao painel o novo estado
+  }
 }
 
 // ---------------------------------------------------------------- setup / loop
 void connectWiFi() {
   WiFi.mode(WIFI_STA);
   WiFi.setHostname(HOSTNAME_MDNS);
+  WiFi.setSleep(false);                             // menos latencia no audio
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
   Serial.print("📶 WiFi");
   for (int i = 0; i < 60 && WiFi.status() != WL_CONNECTED; ++i) { delay(250); Serial.print('.'); }
-  Serial.printf("\n📶 %s  IP %s\n", WiFi.status() == WL_CONNECTED ? "conectado" : "FALHOU", WiFi.localIP().toString().c_str());
-}
-
-void setupWeb() {
-  web.on("/", HTTP_GET, []() {
-    String h = String("<html><meta charset=utf-8><body style='font-family:sans-serif;background:#060a12;color:#e3eefc'>"
-                      "<h2>J.A.R.V.I.S. ESP32 ") + JARVIS_FW_VERSION + "</h2><p>RAM livre: " + (ESP.getFreeHeap() / 1024) +
-               " KB · WiFi " + WiFi.RSSI() + " dBm · volume " + audio.volume + "%</p><p>Painel completo: <a style='color:#34e4ff' href='" +
-               JARVIS_SERVER_URL + "'>" + JARVIS_SERVER_URL + "</a></p></body></html>";
-    web.send(200, "text/html", h);
-  });
-  web.on("/api/queue", HTTP_GET, []() {       // push direto do servidor na rede local (opcional)
-    String ip = web.client().remoteIP().toString();
-    bool lan = ip.startsWith("192.168.") || ip.startsWith("10.") || ip.startsWith("172.");
-    if (strlen(JARVIS_DEVICE_TOKEN) > 0 && !lan && web.arg("token") != JARVIS_DEVICE_TOKEN) {
-      web.send(401, "application/json", "{\"ok\":false}");
-      return;
-    }
-    enqueue(web.arg("type"), web.arg("key"), web.arg("mode"), web.hasArg("v") ? web.arg("v").toInt() : -1);
-    web.send(200, "application/json", "{\"ok\":true}");
-  });
-  web.begin();
+  Serial.printf("\n📶 %s  IP %s\n", WiFi.status() == WL_CONNECTED ? "conectado" : "FALHOU (seguindo offline)", WiFi.localIP().toString().c_str());
 }
 
 void setup() {
@@ -249,30 +264,27 @@ void setup() {
   pinMode(PIN_EXTERNAL_BTN, INPUT_PULLUP);
   pinMode(PIN_STATUS_LED, OUTPUT);
   prefs.begin("jarvis", false);
-  audio.begin();
+  audio.begin();                                    // primeiro: reserva o buffer MP3 com a RAM inteira
   audio.setVolume(prefs.getInt("vol", DEFAULT_VOLUME_PCT));
-  audio.chime();
-  loadAlarms();
+  agenda.begin(&prefs);
   connectWiFi();
   configTzTime(NTP_TZ, "pool.ntp.org", "a.st1.ntp.br");
-  link.begin();
+  net.begin();
   MDNS.begin(HOSTNAME_MDNS);
   ArduinoOTA.setHostname(HOSTNAME_MDNS);
   ArduinoOTA.setPassword(OTA_PASSWORD);
   ArduinoOTA.begin();
-  setupWeb();
-  Serial.printf("✅ J.A.R.V.I.S. thin client %s | servidor %s | RAM livre %u KB\n",
-                JARVIS_FW_VERSION, JARVIS_SERVER_URL, (unsigned)(ESP.getFreeHeap() / 1024));
-  Serial.println("👉 Botao BOOT/GPIO4 para falar | ENTER no Serial = microfone | texto + ENTER = pergunta digitada");
+  audio.chime();
+  Serial.printf("✅ J.A.R.V.I.S. %s | %s | %d alarmes, %d lembretes | RAM livre %u KB\n", JARVIS_FW_VERSION, NETLIFY_URL,
+                agenda.nAl, agenda.nRem, (unsigned)(ESP.getFreeHeap() / 1024));
+  Serial.println("👉 Botão BOOT/GPIO4 = falar | ENTER no Serial = microfone | texto + ENTER = pergunta digitada");
 }
 
 void loop() {
   ArduinoOTA.handle();
-  web.handleClient();
-
   if (WiFi.status() != WL_CONNECTED) {
     static uint32_t lastTry = 0;
-    if (millis() - lastTry > 10000) { lastTry = millis(); WiFi.reconnect(); }
+    if (millis() - lastTry > 15000) { lastTry = millis(); WiFi.reconnect(); }
   }
 
   bool pressed = AudioIO::buttonPressed();
@@ -284,26 +296,21 @@ void loop() {
     typed.trim();
     serialMic = typed.length() == 0;
   }
-
-  if (pressed || listenRequested || serialMic || typed.length() > 0) {
+  if (pressed || listenRequested || serialMic || typed.length()) {
     listenRequested = false;
-    busy = true;
-    stopPoll();                     // uma conexao (TLS) por vez
-    converse(typed);
-    busy = false;
-    while (AudioIO::buttonPressed()) delay(10);
-  } else if (qCount > 0) {
-    Cmd c = queueBuf[qHead];
-    qHead = (qHead + 1) % QMAX;
-    qCount--;
-    busy = true;
-    stopPoll();
-    runCommand(c);
-    busy = false;
-  } else {
-    pollTick();
+    if (WiFi.status() == WL_CONNECTED) converse(typed); else audio.error();
   }
 
-  checkOfflineAlarms();
+  static uint32_t lastTick = 0;
+  if (millis() - lastTick >= 1000) {
+    lastTick = millis();
+    Event ev = agenda.tick();
+    if (ev.kind != EV_NONE) handleEvent(ev);
+  }
+
+  if (agenda.dirty && (int32_t)(nextSyncAt - millis()) > 3000) nextSyncAt = millis() + 3000;
+  if (WiFi.status() == WL_CONNECTED && (int32_t)(millis() - nextSyncAt) >= 0) doSync();
+
+  if (restartRequested) { audio.ok(); delay(300); ESP.restart(); }
   delay(5);
 }

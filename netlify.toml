@@ -1,0 +1,19 @@
+# Deploy: conecte o repositorio no Netlify (plano free). Nao ha build: o painel e estatico e as funcoes sao ESM.
+# Cada deploy de producao custa creditos: publique so quando mudar algo (veja o README).
+[build]
+  publish = "public"
+  command = ""
+
+[functions]
+  directory = "netlify/functions"
+  node_bundler = "esbuild"
+  external_node_modules = ["msedge-tts"]
+
+[build.environment]
+  NODE_VERSION = "22"
+
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Frame-Options = "DENY"
+    Referrer-Policy = "same-origin"

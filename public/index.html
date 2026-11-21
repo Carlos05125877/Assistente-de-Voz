@@ -221,7 +221,7 @@
             <button class="btn" onclick="esp({type:'ask',text:'Liga a luz da sala'})">💡 Luz da sala</button>
             <button class="btn danger" onclick="if(confirm('Reiniciar o ESP32?'))esp({type:'restart'})">⟲ Reiniciar ESP32</button>
           </div>
-          <div class="hint">O ESP32 mantém uma conexão aberta com o servidor (long-poll) e recebe os comandos na hora; se estiver ocupado falando, executa logo em seguida.</div>
+          <div class="hint">Com este painel aberto o ESP32 consulta o Netlify a cada ~10 s (fora isso, a cada 3 min, para gastar poucos créditos). Alarmes, lembretes e timers rodam no próprio ESP32 e tocam mesmo sem internet.</div>
         </div>
       </div>
     </section>
@@ -324,7 +324,7 @@
     <section id="assist">
       <div class="grid two">
         <div class="card">
-          <h3>Lembretes agendados <span class="r small muted">o PC dispara no horário, mesmo com o ESP32 ocupado</span></h3>
+          <h3>Lembretes agendados <span class="r small muted">guardados no ESP32: tocam mesmo sem internet</span></h3>
           <ul class="list" id="rList"></ul>
           <div class="row">
             <input class="grow" id="rmText" placeholder="Lembrar de... (ex: pagar a conta de luz)">
@@ -399,7 +399,7 @@ som"></textarea>
     <section id="alarms">
       <div class="grid two">
         <div class="card">
-          <h3>Alarmes <span class="r small muted">servidor + cópia no ESP32 para tocar offline</span></h3>
+          <h3>Alarmes <span class="r small muted">guardados no ESP32 (NVS): tocam offline</span></h3>
           <ul class="list" id="aList"></ul>
           <div class="row">
             <input type="time" id="aTime" value="07:00">
@@ -441,7 +441,6 @@ som"></textarea>
           <div class="row"><span class="small muted" style="width:120px">Seu nome</span><input class="grow" id="cfg_user_name" placeholder="Como o Jarvis te chama (vazio = senhor)"></div>
           <div class="row"><span class="small muted" style="width:120px">Cidade (clima)</span><input class="grow" id="cfg_city"></div>
           <div class="row"><span class="small muted" style="width:120px">Lat / Lon</span><input class="grow" id="cfg_latitude"><input class="grow" id="cfg_longitude"></div>
-          <div class="row"><span class="small muted" style="width:120px">IP do ESP32</span><input class="grow" id="cfg_esp_ip" placeholder="so se o servidor estiver na mesma rede (vazio = long-poll)"></div>
           <div style="margin-top:12px" class="small muted">O briefing inclui:</div>
           <label class="toggle"><input type="checkbox" id="cfg_briefing_weather">Clima</label>
           <label class="toggle"><input type="checkbox" id="cfg_briefing_alarms">Próximos alarmes</label>
@@ -461,7 +460,7 @@ som"></textarea>
           <div class="reader small" id="cBrief" style="display:none;margin-top:10px"></div>
         </div>
         <div class="card">
-          <h3>Chaves de API <span class="r small muted">ficam só no servidor</span></h3>
+          <h3>Chaves de API <span class="r small muted">ficam no Netlify Blobs; a do Groq vai para o ESP32</span></h3>
           <div class="row"><span class="small muted" style="width:130px">Groq (voz → texto)</span><input class="grow" type="password" id="sec_groq_api_key"></div>
           <div class="row"><span class="small muted" style="width:130px">Gemini (IA)</span><input class="grow" type="password" id="sec_gemini_api_key"></div>
           <div class="row"><span class="small muted" style="width:130px">Modelo Gemini</span><input class="grow" id="sec_gemini_model"></div>
@@ -482,7 +481,8 @@ som"></textarea>
         <div class="card">
           <h3>Servidor</h3>
           <div class="kv" id="sysKv"></div>
-          <div class="row"><a class="btn" href="/classic">Painel clássico</a><a class="btn" href="/youversion/debug" target="_blank">Diagnóstico YouVersion</a><a class="btn" href="/api/state" target="_blank">Estado (JSON)</a></div>
+          <div class="row"><a class="btn" href="/youversion/debug" target="_blank">Diagnóstico YouVersion</a><a class="btn" href="/api/state" target="_blank">Estado (JSON)</a></div>
+          <div class="hint">O Netlify só roda quando alguém chama (voz, painel ou sync do ESP32): sem servidor ligado 24 h e sem custo no plano free.</div>
         </div>
       </div>
     </section>
@@ -502,6 +502,7 @@ async function api(path, opts={}){
     const r = await fetch(path, opts);
     const ct = r.headers.get('content-type')||'';
     const d = ct.includes('json') ? await r.json() : await r.text();
+    if(r.status===401){ location.href='/login'; return null; }
     if(!r.ok){ toast((d && d.error) || ('Erro HTTP '+r.status), true); return null; }
     return d;
   }catch(e){ toast('Servidor indisponível: '+e.message, true); return null; }
@@ -521,7 +522,7 @@ document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>go(b.dataset.ta
 // ---------- comandos para o ESP32
 async function esp(cmd){
   const d = await post('/api/esp/send', cmd);
-  if(d && d.ok) toast(d.delivered==='direct' ? 'Enviado ao Jarvis ✓' : 'ESP32 ocupado/offline: comando na fila');
+  if(d && d.ok){ toast(S?.device?.online ? 'Enviado ✓ o Jarvis executa em até ~10 s' : 'ESP32 offline: comando na fila (vale por 15 min)'); setTimeout(refresh, 11000); }
   else if(d) toast(d.error||'Falha', true);
 }
 const espBible = action => esp({type:'bible', action});
@@ -540,7 +541,7 @@ function previewTts(text, key){
   const st = S?.settings || {};
   const voice = $('vVoice').value || st.voice, rate = $('vRate').value || st.rate;
   let q = key ? 'key='+encodeURIComponent(key) : 'text='+encodeURIComponent(text||'Olá, eu sou o Jarvis.');
-  const p=$('player'); p.style.display='block'; p.src='/api/tts/preview?'+q+'&voice='+encodeURIComponent(voice)+'&rate='+encodeURIComponent(rate); p.play().catch(()=>{});
+  const p=$('player'); p.style.display='block'; p.src='/api/tts?'+q+'&voice='+encodeURIComponent(voice)+'&rate='+encodeURIComponent(rate); p.play().catch(()=>{});
   if(!$('voice').classList.contains('on')) toast('Gerando áudio... (player na aba Comandos & voz)');
 }
 async function saveVoice(){ const d=await post('/api/settings',{voice:$('vVoice').value, rate:$('vRate').value}); if(d) toast('Voz salva'); }
@@ -605,7 +606,7 @@ function delDevice(i){ const d=[...S.smart_devices]; d.splice(i,1); saveDevices(
 async function smartCtl(i, state){ const d=await post('/api/smart/control',{name:S.smart_devices[i].name, state}); if(d) toast(d.message); }
 
 // ---------- configuracoes
-const CFG=['user_name','city','latitude','longitude','esp_ip','briefing_weather','briefing_alarms','briefing_plan','briefing_plan_full','briefing_verse','briefing_reminders','briefing_dates','briefing_quotes','briefing_news','news_topic'];
+const CFG=['user_name','city','latitude','longitude','briefing_weather','briefing_alarms','briefing_plan','briefing_plan_full','briefing_verse','briefing_reminders','briefing_dates','briefing_quotes','briefing_news','news_topic'];
 function fillSettings(st){ CFG.forEach(k=>{ const el=$('cfg_'+k); if(!el || document.activeElement===el) return; if(el.type==='checkbox') el.checked=!!st[k]; else el.value=st[k]??''; }); }
 async function saveSettings(){ const b={}; CFG.forEach(k=>{ const el=$('cfg_'+k); b[k]= el.type==='checkbox'? el.checked : el.value; }); const d=await post('/api/settings',b); if(d){ toast('Configurações salvas'); loadWeather(true);} }
 async function testBriefing(){ $('cBrief').style.display='block'; $('cBrief').textContent='Gerando...'; const d=await api('/api/briefing'); if(d) $('cBrief').textContent=d.spoken; }
@@ -633,8 +634,8 @@ function render(){
   // ESP32
   $('hEspSeen').textContent = dev.last_seen_ago!=null ? 'visto há '+dev.last_seen_ago+' s' : '';
   $('hEspKv').innerHTML = dev.ip ? `<span>IP</span><span class="mono">${esc(dev.ip)}</span><span>Uptime</span><span>${fmtUp(dev.uptime)}</span><span>RAM</span><span>${dev.heap??'?'} KB (min ${dev.min_heap??'?'} KB)</span><span>WiFi</span><span>${dev.rssi??'?'} dBm</span><span>Firmware</span><span>${esc(dev.fw||'?')}${dev.busy?' · falando/ouvindo':''}</span>${dev.queue?`<span>Fila</span><span>${dev.queue} comando(s)</span>`:''}`
-                               : '<span>Status</span><span class="muted">Aguardando o ESP32 conectar. Confira JARVIS_SERVER_URL e JARVIS_DEVICE_TOKEN no secrets_local.h.</span>';
-  $('hHeap').style.width = Math.min(100, (dev.heap||0)/320*100)+'%';
+                               : '<span>Status</span><span class="muted">Aguardando o ESP32 conectar. Confira NETLIFY_URL e DEVICE_TOKEN no secrets_local.h.</span>';
+  $('hHeap').style.width = Math.min(100, (dev.heap||0)/200*100)+'%';
   $('hRssi').style.width = dev.rssi ? Math.max(0, Math.min(100, (dev.rssi+95)/60*100))+'%' : '0';
   if(document.activeElement!==$('hVol') && dev.volume!=null){ $('hVol').value=dev.volume; $('hVolL').textContent=dev.volume+'%'; }
 
@@ -685,22 +686,26 @@ function render(){
   // voz / config
   const vs=$('vVoice'); if(!vs.options.length){ vs.innerHTML=(s.voices||[]).map(v=>`<option value="${v.id}">${esc(v.label)}</option>`).join(''); vs.value=s.settings.voice; $('vRate').value=s.settings.rate; }
   fillSettings(s.settings); fillSecrets(s.secrets||{}); renderDevices();
-  $('sysKv').innerHTML = `<span>Hora do servidor</span><span>${esc(s.server.time)}</span><span>Uptime</span><span>${fmtUp(s.server.uptime)}</span><span>Voz</span><span>${esc(s.settings.voice)} (${esc(s.settings.rate)})</span><span>Histórico Bíblia</span><span>${(s.bible_history||[]).map(h=>esc(h.reference)).join(', ')||'—'}</span>`;
+  $('sysKv').innerHTML = `<span>Hora do servidor</span><span>${esc(s.server.time)}</span><span>Função aquecida há</span><span>${fmtUp(s.server.uptime)}</span><span>Voz</span><span>${esc(s.settings.voice)} (${esc(s.settings.rate)})</span><span>Senha do painel</span><span>${s.server.configured.panel?'definida':'<b style="color:var(--red)">PANEL_PASSWORD não definida</b>'}</span><span>Token do ESP32</span><span>${s.server.configured.device?'definido':'<b style="color:var(--red)">DEVICE_TOKEN não definido</b>'}</span>`;
 }
-async function refresh(){ const d=await api('/api/state'); if(d){ S=d; render(); } }
+async function refresh(){
+  if(document.hidden) return;
+  const d=await api('/api/state?after='+lastEv); if(!d) return;
+  S=d; render(); takeEvents(d.events||[]);
+}
 
 // ---------- eventos
 function renderEvents(){
   const f=$('eFilter').value;
   $('eLog').innerHTML = events.filter(e=>!f||e.kind===f).slice(-250).reverse().map(e=>`<div class="e ${e.level}">${e.time} [${esc(e.kind)}] ${esc(e.msg)}</div>`).join('') || '<span class="muted">Sem eventos ainda.</span>';
 }
-async function pollEvents(){
-  try{ const r=await fetch('/api/events?after='+lastEv); const d=await r.json();
-    if(d.events.length){ events=events.concat(d.events).slice(-400); lastEv=d.events[d.events.length-1].id; renderEvents();
+function takeEvents(evs){
+  const d={events:evs};
+  { if(d.events.length){ events=events.concat(d.events).slice(-400); lastEv=d.events[d.events.length-1].id; renderEvents();
       if(d.events.some(e=>['lembrete','lista','assistente','rotina'].includes(e.kind))) loadAssist();
       if(evInit) d.events.filter(e=>e.kind==='voz'||e.level==='error').forEach(e=>toast(e.msg.slice(0,140), e.level==='error')); }
     evInit = true;
-  }catch(e){}
+  }
 }
 
 // ---------- assistente
@@ -773,9 +778,13 @@ const qs = new URLSearchParams(location.search);
 if(qs.get('youversion')){ const m={ok:'Conta YouVersion conectada!',error:'Falha no login do YouVersion (veja o erro na aba Bíblia)',synced:'Planos sincronizados',logout:'Desconectado do YouVersion',session_ok:'Sessão salva',missing:'Preencha usuário e senha'}; toast(m[qs.get('youversion')]||'OK', qs.get('youversion')==='error'); history.replaceState(null,'','/#bible'); }
 if(qs.get('spotify')){ toast('Spotify conectado!'); history.replaceState(null,'','/#spotify'); }
 go((location.hash||'#home').slice(1) in TITLES ? (location.hash||'#home').slice(1) : 'home');
-refresh(); loadWeather(); pollEvents(); setTimeout(spNow, 800); loadAssist(); setTimeout(loadInfo, 600);
-setInterval(loadAssist, 15000); setInterval(loadInfo, 300000);
-setInterval(refresh, 4000); setInterval(pollEvents, 2500); setInterval(spNow, 15000); setInterval(()=>loadWeather(false), 600000);
+// Poucas requisicoes = poucos creditos do Netlify: estado a cada 10 s so com a aba visivel.
+refresh(); loadWeather(); setTimeout(spNow, 800); loadAssist(); setTimeout(loadInfo, 600);
+setInterval(()=>{ if(!document.hidden) loadAssist(); }, 30000); setInterval(()=>{ if(!document.hidden) loadInfo(); }, 600000);
+setInterval(refresh, 10000); setInterval(()=>{ if(!document.hidden && $('spotify').classList.contains('on')) spNow(); }, 20000); setInterval(()=>{ if(!document.hidden) loadWeather(false); }, 1800000);
+document.addEventListener('visibilitychange', ()=>{ if(!document.hidden){ refresh(); loadAssist(); } });
+// timers: contagem regressiva local entre os syncs
+setInterval(()=>{ if(!S) return; (S.timers||[]).forEach(t=>t.left=Math.max(0,t.left-1)); $('tActive').innerHTML=(S.timers||[]).map(t=>`⏲ ${esc(t.label)} — ${Math.floor(t.left/60)}:${String(t.left%60).padStart(2,'0')}`).join('<br>')||'<span class="muted">Nenhum timer ativo</span>'; }, 1000);
 </script>
 </body>
 </html>

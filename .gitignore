@@ -11,3 +11,7 @@ __pycache__/
 *.wav
 external_server/jarvis_device.json
 external_server/*.tmp
+
+# Netlify / Node
+node_modules/
+.netlify/

@@ -1,0 +1,12 @@
+{
+  "name": "jarvis-netlify",
+  "private": true,
+  "type": "module",
+  "description": "Backend sob demanda do J.A.R.V.I.S. (ESP32) no Netlify: agente, TTS, YouVersion, Spotify, casa e painel.",
+  "engines": { "node": ">=20" },
+  "scripts": { "test": "node --test tests/*.test.mjs" },
+  "dependencies": {
+    "@netlify/blobs": ">=8.1.0",
+    "msedge-tts": "^2.1.1"
+  }
+}

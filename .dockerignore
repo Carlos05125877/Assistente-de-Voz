@@ -1,8 +1,0 @@
-.git
-.pio
-*.h
-*.ino
-platformio.ini
-external_server/jarvis_data.json
-external_server/jarvis_device.json
-external_server/__pycache__
