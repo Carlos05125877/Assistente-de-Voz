@@ -1,8 +1,8 @@
 # 🤖 J.A.R.V.I.S. — Assistente de voz com ESP32 + servidor na nuvem
 
 O **ESP-WROOM-32** é só "boca e ouvido": microfone INMP441, 2 alto-falantes MAX98357A e um botão.
-**Toda a inteligência roda no servidor** (`external_server/jarvis_bridge_server.py`), hospedado no
-**Fly.io (região São Paulo)** ou num PC da rede local.
+**Toda a inteligência roda no servidor** (`external_server/jarvis_bridge_server.py`), que pode ficar
+**de graça** numa VM Oracle Cloud Always Free, num PC/Raspberry Pi em casa ou, pago, no Fly.io.
 
 ```
  ESP32 ──POST /api/voice (áudio PCM enquanto você fala)──▶ Servidor
@@ -33,24 +33,42 @@ O **ESP-WROOM-32** é só "boca e ouvido": microfone INMP441, 2 alto-falantes MA
 
 GPIO 6–11 são da flash SPI e não devem ser usados.
 
-## 2. Servidor no Fly.io (recomendado)
-Por que não Netlify/Render free: o Jarvis precisa de um processo **sempre ligado** (agendador de alarmes e lembretes, long-poll do ESP32 e conversa em streaming). Funções serverless têm limite curto de execução, e o plano free do Render "dorme" sem tráfego e apaga os arquivos.
+## 2. Onde rodar o servidor (opções gratuitas)
+O Jarvis precisa de um processo **sempre ligado** (agendador de alarmes e lembretes, long-poll do ESP32 e conversa em streaming). Por isso Netlify/Vercel (funções com limite de tempo), Render/Koyeb free (dormem sem tráfego e apagam os arquivos) e Hugging Face (Docker agora é pago) **não servem**.
 
+### Opção A — Oracle Cloud *Always Free* (nuvem, grátis 24 h)
+1. Crie a conta em oracle.com/cloud/free. Pedem cartão de **crédito** só para verificação; o Always Free não é cobrado. Escolha **Brazil East (São Paulo)** ou **Brazil Southeast (Vinhedo)** como *home region*, porque não dá para trocar depois.
+2. Crie uma instância **Ubuntu**. Prefira a forma *VM.Standard.A1.Flex* (ARM); se aparecer "out of capacity", use a *VM.Standard.E2.1.Micro*.
+3. Entre por SSH e rode:
+   ```bash
+   git clone https://github.com/Carlos05125877/Assistente-de-Voz.git && cd Assistente-de-Voz
+   sudo bash deploy/oracle-setup.sh --funnel
+   ```
+   O script instala tudo, cria o serviço `jarvis` (reinicia sozinho) e mostra o `DEVICE_TOKEN`. Com `--funnel` ele também publica o painel em **HTTPS grátis sem domínio e sem abrir portas** (Tailscale Funnel: `https://<máquina>.<rede>.ts.net`).
+4. Coloque essa URL em `PUBLIC_URL` (`/etc/jarvis.env`) e em `JARVIS_SERVER_URL` no ESP32, depois rode `sudo systemctl restart jarvis`.
+
+### Opção B — Em casa (PC, notebook velho ou Raspberry Pi), sem cartão
+- **Windows:** rode `deploy\iniciar_jarvis_windows.bat`. Para iniciar com o Windows, ponha um atalho dele em `shell:startup`.
+- **Linux / Raspberry Pi:** `sudo bash deploy/oracle-setup.sh`, o mesmo script da opção A.
+- O ESP32 usa `http://IP-DO-PC:8080`, que é a menor latência possível.
+- **Painel fora de casa:** instale o **Tailscale** (grátis para uso pessoal) no PC e no celular. Sem ele, o painel só abre na rede local.
+
+### Opção paga — Fly.io (região São Paulo)
+`Dockerfile` e `fly.toml` já estão prontos:
 ```bash
-# 1. Instale o flyctl e faça login: https://fly.io/docs/flyctl/install/
 fly launch --no-deploy --copy-config --name jarvis-SEUNOME --region gru
 fly volumes create jarvis_data --region gru --size 1
-fly secrets set PANEL_PASSWORD='uma-senha-forte' DEVICE_TOKEN="$(openssl rand -hex 16)" \
-               PUBLIC_URL='https://jarvis-SEUNOME.fly.dev'
+fly secrets set PANEL_PASSWORD='uma-senha-forte' DEVICE_TOKEN="$(openssl rand -hex 16)" PUBLIC_URL='https://jarvis-SEUNOME.fly.dev'
 fly deploy
-fly secrets list            # anote o DEVICE_TOKEN para o ESP32 (ou defina um valor seu)
 ```
-Depois, abra `https://jarvis-SEUNOME.fly.dev`, entre com a senha e preencha, na aba **Sistema**:
+
+### Depois de subir o servidor
+Abra o painel, entre com a senha e preencha, na aba **Sistema**:
 - **Chaves de API:** Groq (voz → texto) e Gemini (IA). As chaves da Tuya são opcionais.
 - **Casa inteligente:** cadastre os dispositivos SmartLife.
 - **Cidade/coordenadas:** usadas pelo clima.
 
-Na aba **Spotify**, cadastre a Redirect URI `https://jarvis-SEUNOME.fly.dev/spotify/callback` no Spotify Developer Dashboard e conecte. Na aba **Bíblia**, entre na sua conta YouVersion.
+Na aba **Spotify**, cadastre a Redirect URI `<PUBLIC_URL>/spotify/callback` e conecte. Na aba **Bíblia**, entre na sua conta YouVersion.
 
 **Rodar no PC (rede local):**
 ```bash
@@ -72,7 +90,7 @@ Crie `secrets_local.h` (está no `.gitignore`):
 ```cpp
 #define WIFI_SSID           "MinhaRede"
 #define WIFI_PASSWORD       "minha-senha"
-#define JARVIS_SERVER_URL   "https://jarvis-SEUNOME.fly.dev"   // ou "http://192.168.1.120:8080"
+#define JARVIS_SERVER_URL   "https://jarvis.SUA-REDE.ts.net"   // ou "http://192.168.1.120:8080" em casa
 #define JARVIS_DEVICE_TOKEN "o-mesmo-DEVICE_TOKEN-do-servidor"
 #define OTA_PASSWORD        "troque-esta-senha"
 ```
