@@ -25,6 +25,12 @@
 //    o DMA do I2S sem carregar o arquivo inteiro na RAM (permite falas longas!).
 // ============================================================================
 
+// Audio "pendente" no Bridge Server: quando o BibleClient recebe um devocional longo,
+// o ESP32 guarda so um resumo e o texto COMPLETO e falado via /api/tts?key=<chave>.
+// So e usado se o texto a falar comecar com g_bridgeTtsPrefix (evita tocar audio errado).
+static String g_bridgeTtsKey = "";
+static String g_bridgeTtsPrefix = "";
+
 class AudioManager {
 public:
   int volumePercent = DEFAULT_VOLUME_PCT; // 0 a 100
@@ -532,16 +538,63 @@ public:
   bool speakText(WiFiClientSecure& cli, const String& text) {
     if (text.length() == 0) return false;
 
-    // 1. Tenta primeiro via Bridge Server (Edge-TTS Neural pt-BR-AntonioNeural)
+    // 1. Tenta primeiro via Bridge Server (Edge-TTS Neural pt-BR-AntonioNeural, PCM 16 kHz em blocos)
     if (strlen(EXTERNAL_SERVER_URL) > 5) {
-      String ttsUrl = String(EXTERNAL_SERVER_URL) + "/api/tts?text=" + urlEncodeText(text);
-      Serial.println("🔊 [TTS Bridge] Reproduzindo voz neural Edge-TTS (pt-BR-AntonioNeural)...");
-      if (streamRawAudioFromUrl(ttsUrl, 90)) {
-        return true;
+      String base = String(EXTERNAL_SERVER_URL) + "/api/tts";
+      bool ok = false;
+      if (g_bridgeTtsKey.length() > 0 && g_bridgeTtsPrefix.length() > 0 && text.startsWith(g_bridgeTtsPrefix)) {
+        // Devocional/plano completo guardado no servidor: nada de texto gigante na RAM/URL
+        Serial.println("🔊 [TTS Bridge] Lendo o texto completo guardado no servidor (key=" + g_bridgeTtsKey + ")...");
+        String keyUrl = base + "?key=" + g_bridgeTtsKey;
+        g_bridgeTtsKey = "";
+        ok = streamRawAudioFromUrl(keyUrl, 3600);
+      } else if (text.length() > 600) {
+        // Texto longo: vai no corpo do POST (evita URL de varios KB)
+        Serial.println("🔊 [TTS Bridge] Texto longo via POST /api/tts...");
+        ok = streamRawAudioFromUrl(base, 3600, &text);
+      } else {
+        Serial.println("🔊 [TTS Bridge] Reproduzindo voz neural Edge-TTS (pt-BR-AntonioNeural)...");
+        ok = streamRawAudioFromUrl(base + "?text=" + urlEncodeText(text), 600);
       }
+      g_bridgeTtsKey = "";
+      if (ok) return true;
       Serial.println("⚠️ [TTS Bridge] Servidor externo indisponivel. Usando Gemini TTS direto...");
     }
 
+    // 2. Fallback: Gemini TTS em blocos de ate ~900 caracteres (cada requisicao cabe na RAM)
+    bool any = false;
+    int pos = 0;
+    const int n = (int)text.length();
+    while (pos < n) {
+      int end = nextTtsChunkEnd(text, pos, 900);
+      String part = text.substring(pos, end);
+      part.trim();
+      if (part.length() > 0) {
+        if (!speakGeminiChunk(cli, part)) break;
+        any = true;
+      }
+      pos = end;
+      if (digitalRead(PIN_WAKE_BUTTON) == LOW || digitalRead(PIN_EXTERNAL_BTN) == LOW) break;
+    }
+    return any;
+  }
+
+  // Fim do proximo bloco: ultima pontuacao final dentro do limite (ou ultimo espaco)
+  static int nextTtsChunkEnd(const String& text, int pos, int maxLen) {
+    int n = (int)text.length();
+    if (n - pos <= maxLen) return n;
+    int limit = pos + maxLen;
+    for (int i = limit; i > pos + 120; --i) {
+      char c = text.charAt(i - 1);
+      if (c == '.' || c == '!' || c == '?' || c == ';') return i;
+    }
+    for (int i = limit; i > pos + 60; --i) {
+      if (text.charAt(i - 1) == ' ') return i;
+    }
+    return limit;
+  }
+
+  bool speakGeminiChunk(WiFiClientSecure& cli, const String& text) {
     // 2. Fallback Standalone: Google AI Studio Gemini TTS (audio/L16;codec=pcm;rate=24000)
     cli.stop();
     cli.setInsecure();
@@ -552,7 +605,7 @@ public:
       return false;
     }
 
-    DynamicJsonDocument reqDoc(2048);
+    DynamicJsonDocument reqDoc(1024 + text.length() * 2);
     JsonArray contents = reqDoc.createNestedArray("contents");
     JsonObject c0 = contents.createNestedObject();
     JsonArray parts = c0.createNestedArray("parts");
@@ -707,18 +760,28 @@ public:
   // ==== STREAMING DE MUSICA PCM / RADIO / SPOTIFY DO SERVIDOR EXTERNO NOS 2 ALTO-FALANTES ====
   // Recebe audio PCM 16-bit 16kHz Mono/Estereo via HTTP do Servidor Externo (Jarvis Bridge)
   // e reproduz em tempo real nos 2 alto-falantes do ESP32 ate terminar ou pressionar o botao BOOT!
-  bool streamRawAudioFromUrl(const String& streamUrl, int maxDurationSec = 45) {
+  // postBody != nullptr -> envia o texto no corpo (POST); o servidor responde PCM em blocos
+  // ate fechar a conexao (sem Content-Length), entao maxDurationSec e so um limite de seguranca.
+  bool streamRawAudioFromUrl(const String& streamUrl, int maxDurationSec = 45, const String* postBody = nullptr) {
     if (streamUrl.length() < 8) return false;
 
-    Serial.printf("🎵 [AudioStream] Conectando ao stream de musica: %s\n", streamUrl.c_str());
+    Serial.printf("🎵 [AudioStream] Conectando ao stream de audio: %.120s\n", streamUrl.c_str());
     HTTPClient http;
     WiFiClient tcpCli;
     if (!http.begin(tcpCli, streamUrl)) {
       Serial.println("❌ [AudioStream] Falha ao iniciar conexao HTTP de audio");
       return false;
     }
+    http.setConnectTimeout(3000);
+    http.setTimeout(30000);   // o 1o bloco de voz e sintetizado antes de chegar o cabecalho HTTP
 
-    int code = http.GET();
+    int code;
+    if (postBody != nullptr) {
+      http.addHeader("Content-Type", "text/plain; charset=utf-8");
+      code = http.POST(*postBody);
+    } else {
+      code = http.GET();
+    }
     if (code != 200) {
       Serial.printf("❌ [AudioStream] HTTP %d ao abrir stream\n", code);
       http.end();
