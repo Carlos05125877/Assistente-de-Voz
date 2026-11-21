@@ -1,0 +1,4 @@
+# O servidor jarvis_bridge_server.py usa a Biblioteca Padrao do Python 3 para Biblia, Spotify e Alarmes,
+# e usa edge-tts + miniaudio (100% gratuitos e sem cartao) para a voz neural do Jarvis (pt-BR-AntonioNeural):
+edge-tts>=7.0.0
+miniaudio>=1.73.0

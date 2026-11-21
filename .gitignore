@@ -1,0 +1,11 @@
+# Credenciais e sessoes locais privadas (nao enviar chaves reais ao GitHub)
+secrets_local.h
+external_server/jarvis_data.json
+
+# Build / Cache
+.pio/
+build/
+__pycache__/
+*.pyc
+*.mp3
+*.wav
