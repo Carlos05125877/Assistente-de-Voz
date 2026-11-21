@@ -196,6 +196,10 @@ void loop() {
     cooldownUntil = millis() + 1500;
   }
 
+  // 2b. Executa comandos da fila (HUD / Painel de Controle no PC) e envia heartbeat ao Bridge
+  webPortal.processQueue();
+  webPortal.tickHeartbeat();
+
   // 3. Verifica Timers Regressivos e Alarmes Despertadores (HH:MM) salvos na NVS
   jarvis.checkTimersAndAlarms(audio, sharedTlsClient);
 

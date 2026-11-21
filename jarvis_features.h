@@ -9,6 +9,7 @@
 #include <time.h>
 #include "config_private.h"
 #include "audio_manager.h"
+#include "bridge_link.h"
 
 // ============================================================================
 // FUNCIONALIDADES COMPLETAS DO SISTEMA JARVIS (ALARMES NVS, TIMERS, NOTAS, CLIMA)
@@ -310,10 +311,40 @@ public:
             audio.playAlarmSound();
             String speech = "Atencao senhor! Sao " + String(hBuf) + ". Alarme programado: " + lbl + ".";
             audio.speakText(tlsClient, speech);
+
+            // Alarme devocional: em seguida le o briefing (clima, agenda e o plano da Biblia do dia)
+            if (labelWantsBriefing(lbl)) {
+              delay(400);
+              audio.speakText(tlsClient, morningBriefing(tlsClient));
+            }
           }
         }
       }
     }
+  }
+
+  // Rotulos que disparam o briefing apos o alarme
+  static bool labelWantsBriefing(String lbl) {
+    lbl.toLowerCase();
+    return lbl.indexOf("devocional") >= 0 || lbl.indexOf("biblia") >= 0 || lbl.indexOf("bíblia") >= 0 ||
+           lbl.indexOf("briefing") >= 0 || lbl.indexOf("plano") >= 0;
+  }
+
+  // ==== BRIEFING MATINAL ====
+  // Com o Bridge: clima, alarmes, devocional completo e versiculo (configuravel no Painel do PC).
+  // Sem o Bridge: clima + alarmes direto do ESP32.
+  String morningBriefing(WiFiClientSecure& cli) {
+    String spoken;
+    if (BridgeLink::fetchSpoken("/api/briefing?client=esp32", spoken)) {
+      return spoken;
+    }
+    struct tm t;
+    String hello = "Ola senhor.";
+    if (getLocalTime(&t, 50)) {
+      hello = String(t.tm_hour < 12 ? "Bom dia" : (t.tm_hour < 18 ? "Boa tarde" : "Boa noite")) +
+              " senhor. Agora sao " + String(t.tm_hour) + " e " + String(t.tm_min) + ".";
+    }
+    return hello + " " + getWeatherReport(cli) + " Alarmes: " + listAlarms() + ".";
   }
 
   // ==== LISTA DE LEMBRETES / NOTAS / COMPRAS (SALVA EM NVS) ====

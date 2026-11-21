@@ -212,7 +212,7 @@ public:
 
       JsonObject pAct = props.createNestedObject("action");
       pAct["type"] = "STRING";
-      pAct["description"] = "Acao: set_alarm, list_alarms, remove_alarm, clear_alarms, set_timer, cancel_timers, list_timers, add_note, get_notes, clear_notes, get_weather, set_speaker_volume, system_status";
+      pAct["description"] = "Acao: set_alarm, list_alarms, remove_alarm, clear_alarms, set_timer, cancel_timers, list_timers, add_note, get_notes, clear_notes, get_weather, set_speaker_volume, system_status, morning_briefing (resumo do dia: clima, alarmes, devocional/plano da Biblia e versiculo)";
 
       JsonObject pHr = props.createNestedObject("alarm_hour");
       pHr["type"] = "INTEGER";
@@ -374,6 +374,9 @@ public:
             audio.setVolume(vol);
             audio.playSuccessBeep();
             toolResultSummary = "Volume dos alto-falantes do Jarvis ajustado para " + String(vol) + " por cento.";
+          } else if (action == "morning_briefing") {
+            toolResultSummary = jarvis.morningBriefing(cli);
+            isDirectReadoutTool = true;
           } else if (action == "system_status") {
             toolResultSummary = jarvis.getSystemDiagnostics(audio);
             isDirectReadoutTool = true;

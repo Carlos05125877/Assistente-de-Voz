@@ -30,6 +30,8 @@ import json
 import time
 import uuid
 import base64
+import threading
+from collections import deque
 import http.cookiejar
 import urllib.parse
 import urllib.request
@@ -266,7 +268,9 @@ DEFAULT_DATA = {
         {"h": 7, "m": 0, "r": True, "l": "Devocional Matinal & Despertador"}
     ],
     "notes": [],
-    "bible_history": []
+    "bible_history": [],
+    "settings": {},
+    "tts_store": {},
 }
 
 
@@ -294,9 +298,16 @@ def load_data() -> Dict[str, Any]:
     return json.loads(json.dumps(DEFAULT_DATA))
 
 
+_DATA_LOCK = threading.RLock()
+
+
 def save_data(data: Dict[str, Any]) -> None:
-    with open(DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
+    """Gravacao atomica (arquivo temporario + os.replace): requisicoes simultaneas nunca corrompem o JSON."""
+    with _DATA_LOCK:
+        tmp = f"{DATA_FILE}.{threading.get_ident()}.tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+        os.replace(tmp, DATA_FILE)
 
 
 # ============================================================================
@@ -1854,7 +1865,12 @@ def handle_spotify_query(params: Dict[str, str]) -> Dict[str, Any]:
         data["spotify"]["last_track"] = track_str
         save_data(data)
         prefix = "Tocando agora" if playing else "Pausado em"
-        return {"ok": True, "message": f"{prefix}: {name}, de {artist}.", "track": track_str}
+        imgs = (item.get("album") or {}).get("images") or [{}]
+        return {"ok": True, "message": f"{prefix}: {name}, de {artist}.", "track": track_str,
+                "name": name, "artist": artist, "album": (item.get("album") or {}).get("name", ""),
+                "image": imgs[0].get("url", ""), "is_playing": playing,
+                "progress_ms": cjson.get("progress_ms") or 0, "duration_ms": item.get("duration_ms") or 0,
+                "device": ((cjson.get("device") or {}).get("name") or "")}
 
     return {"ok": True, "message": "Nada esta tocando no Spotify no momento.", "track": "Parado"}
 
@@ -1974,6 +1990,356 @@ def render_dashboard_html() -> str:
 
 
 # ============================================================================
+# PAINEL DE CONTROLE v2 — ESTADO DO ESP32, EVENTOS, CONFIGURACOES, CLIMA, BRIEFING
+# ============================================================================
+PANEL_HTML_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web", "panel.html")
+DEVICE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "jarvis_device.json")
+DEVICE_ONLINE_SEC = 75          # sem heartbeat ha mais que isso = offline
+DEVICE_LOCK = threading.RLock()
+EVENTS_LOCK = threading.Lock()
+EVENTS: "deque[Dict[str, Any]]" = deque(maxlen=400)
+_EVENT_SEQ = [0]
+SERVER_STARTED = time.time()
+
+PT_VOICES = [
+    {"id": "pt-BR-AntonioNeural", "label": "Antonio (masculina, padrao)"},
+    {"id": "pt-BR-FranciscaNeural", "label": "Francisca (feminina)"},
+    {"id": "pt-BR-ThalitaMultilingualNeural", "label": "Thalita (feminina, multilingue)"},
+    {"id": "pt-PT-DuarteNeural", "label": "Duarte (Portugal, masculina)"},
+    {"id": "pt-PT-RaquelNeural", "label": "Raquel (Portugal, feminina)"},
+]
+
+DEFAULT_SETTINGS = {
+    "user_name": "",
+    "voice": "pt-BR-AntonioNeural",
+    "rate": "+0%",
+    "esp_ip": "",                       # vazio = usa o IP informado pelo heartbeat
+    "city": "Sao Paulo",
+    "latitude": "-23.5505",
+    "longitude": "-46.6333",
+    "briefing_weather": True,
+    "briefing_alarms": True,
+    "briefing_plan": True,
+    "briefing_plan_full": True,         # le o devocional completo no briefing
+    "briefing_verse": True,
+}
+
+WMO_PT = {
+    0: "céu limpo", 1: "predominantemente limpo", 2: "parcialmente nublado", 3: "nublado",
+    45: "neblina", 48: "neblina com geada", 51: "garoa fraca", 53: "garoa", 55: "garoa forte",
+    61: "chuva fraca", 63: "chuva", 65: "chuva forte", 66: "chuva congelante", 67: "chuva congelante forte",
+    71: "neve fraca", 73: "neve", 75: "neve forte", 80: "pancadas de chuva fracas", 81: "pancadas de chuva",
+    82: "pancadas de chuva fortes", 95: "trovoadas", 96: "trovoadas com granizo", 99: "trovoadas fortes com granizo",
+}
+WEEKDAYS_PT = ["segunda-feira", "terça-feira", "quarta-feira", "quinta-feira", "sexta-feira", "sábado", "domingo"]
+MONTHS_PT = ["janeiro", "fevereiro", "março", "abril", "maio", "junho", "julho", "agosto",
+             "setembro", "outubro", "novembro", "dezembro"]
+
+
+def log_event(kind: str, msg: str, level: str = "info") -> None:
+    with EVENTS_LOCK:
+        _EVENT_SEQ[0] += 1
+        EVENTS.append({"id": _EVENT_SEQ[0], "ts": time.time(), "time": datetime.now().strftime("%H:%M:%S"),
+                       "kind": kind, "level": level, "msg": str(msg)[:400]})
+    print(f"[{kind}] {msg}")
+
+
+def get_events(after: int = 0) -> List[Dict[str, Any]]:
+    with EVENTS_LOCK:
+        return [e for e in EVENTS if e["id"] > after]
+
+
+def get_settings(data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    data = data if data is not None else load_data()
+    st = dict(DEFAULT_SETTINGS)
+    st.update({k: v for k, v in (data.get("settings") or {}).items() if k in DEFAULT_SETTINGS})
+    return st
+
+
+def update_settings(patch: Dict[str, Any]) -> Dict[str, Any]:
+    data = load_data()
+    st = get_settings(data)
+    for k, v in patch.items():
+        if k not in DEFAULT_SETTINGS:
+            continue
+        if isinstance(DEFAULT_SETTINGS[k], bool):
+            v = v if isinstance(v, bool) else str(v).lower() in ("1", "true", "on", "sim", "yes")
+        else:
+            v = str(v).strip()[:80]
+        st[k] = v
+    if not re.fullmatch(r"[+-]\d{1,2}%", st["rate"]):
+        st["rate"] = "+0%"
+    data["settings"] = st
+    save_data(data)
+    log_event("config", "Configuracoes atualizadas")
+    return st
+
+
+# ---------------------------------------------------------------- estado do ESP32
+def _load_device() -> Dict[str, Any]:
+    try:
+        with open(DEVICE_FILE, "r", encoding="utf-8") as f:
+            d = json.load(f)
+            if isinstance(d, dict):
+                return d
+    except Exception:
+        pass
+    return {"info": {}, "queue": [], "conversations": [], "last_seen": 0}
+
+
+DEVICE: Dict[str, Any] = _load_device()
+
+
+def _save_device() -> None:
+    tmp = DEVICE_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(DEVICE, f, ensure_ascii=False, indent=1)
+    os.replace(tmp, DEVICE_FILE)
+
+
+def device_online() -> bool:
+    return time.time() - float(DEVICE.get("last_seen") or 0) < DEVICE_ONLINE_SEC
+
+
+def handle_heartbeat(payload: Dict[str, Any], client_ip: str) -> Dict[str, Any]:
+    """POST /api/device/heartbeat do ESP32. Responde com os comandos pendentes do painel."""
+    with DEVICE_LOCK:
+        was_online = device_online()
+        info = DEVICE.setdefault("info", {})
+        for k in ("ip", "heap", "min_heap", "rssi", "uptime", "volume", "plan", "notes", "timers",
+                  "alarms", "fw", "busy", "spotify"):
+            if k in payload:
+                info[k] = payload[k]
+        info["ip"] = payload.get("ip") or client_ip
+        DEVICE["last_seen"] = time.time()
+        lu, lr = str(payload.get("last_user") or ""), str(payload.get("last_reply") or "")
+        convs = DEVICE.setdefault("conversations", [])
+        if lr and (not convs or convs[-1].get("reply") != lr or convs[-1].get("user") != lu):
+            convs.append({"time": datetime.now().strftime("%d/%m %H:%M"), "user": lu, "reply": lr})
+            del convs[:-60]
+            log_event("voz", f"Você: {lu} | Jarvis: {lr[:160]}")
+        cmds = DEVICE.get("queue", [])[:6]
+        DEVICE["queue"] = DEVICE.get("queue", [])[6:]
+        _save_device()
+    if not was_online:
+        log_event("esp32", f"ESP32 online em {info['ip']} (RAM {info.get('heap', '?')} KB, WiFi {info.get('rssi', '?')} dBm)")
+    if isinstance(payload.get("alarms"), list):
+        data = load_data()
+        if data.get("alarms") != payload["alarms"]:
+            data["alarms"] = payload["alarms"]
+            save_data(data)
+    return {"ok": True, "commands": cmds, "server_time": int(time.time())}
+
+
+def tts_store_put(key: str, text: str) -> None:
+    data = load_data()
+    store = data.setdefault("tts_store", {})
+    store[key] = text
+    if key == "last":
+        data["last_spoken_tts"] = text
+    save_data(data)
+
+
+def tts_store_get(key: str) -> str:
+    data = load_data()
+    if key == "last":
+        return str(data.get("last_spoken_tts") or "")
+    return str((data.get("tts_store") or {}).get(key) or "")
+
+
+ESP_CMD_TYPES = ("speak", "say_key", "ask", "mic", "volume", "alarm_add", "alarm_remove", "alarm_clear",
+                 "note_add", "notes_clear", "timer", "test", "briefing", "bible", "spotify", "restart")
+
+
+def esp_send(cmd: Dict[str, Any]) -> Dict[str, Any]:
+    """Envia um comando ao ESP32: direto em http://<ip>/api/queue ou, se falhar, na fila do heartbeat."""
+    ctype = str(cmd.get("type", ""))
+    if ctype not in ESP_CMD_TYPES:
+        return {"ok": False, "error": f"tipo de comando invalido: {ctype}"}
+    clean: Dict[str, Any] = {"type": ctype}
+    for k in ("text", "key", "h", "m", "v", "label", "r", "mode", "action", "sec"):
+        if k in cmd and cmd[k] not in (None, ""):
+            clean[k] = cmd[k]
+    # Fala longa: o texto completo fica no servidor; o ESP recebe so a chave + um resumo
+    if ctype == "speak" and len(str(clean.get("text", ""))) > 300:
+        full = str(clean["text"])
+        tts_store_put("panel", full)
+        clean = {"type": "say_key", "key": "panel", "text": _short_for_device(full, 280)}
+    st = get_settings()
+    ip = st.get("esp_ip") or DEVICE.get("info", {}).get("ip")
+    if ip:
+        qs = urllib.parse.urlencode({k: (1 if v is True else 0 if v is False else v) for k, v in clean.items()})
+        code, body = http_request(f"http://{ip}/api/queue?{qs}", timeout=4)
+        if code == 200:
+            log_event("painel", f"Comando '{ctype}' enviado ao ESP32 ({ip})")
+            return {"ok": True, "delivered": "direct"}
+    with DEVICE_LOCK:
+        q = DEVICE.setdefault("queue", [])
+        q.append(clean)
+        del q[:-12]
+        _save_device()
+    log_event("painel", f"ESP32 não respondeu; comando '{ctype}' na fila (entregue no próximo heartbeat)", "warn")
+    return {"ok": True, "delivered": "queued"}
+
+
+# ---------------------------------------------------------------- clima
+_WEATHER_CACHE: Dict[str, Any] = {"ts": 0, "key": "", "data": None}
+
+
+def get_weather(force: bool = False) -> Dict[str, Any]:
+    st = get_settings()
+    key = f"{st['latitude']},{st['longitude']}"
+    if not force and _WEATHER_CACHE["data"] and _WEATHER_CACHE["key"] == key and time.time() - _WEATHER_CACHE["ts"] < 600:
+        return _WEATHER_CACHE["data"]
+    url = ("https://api.open-meteo.com/v1/forecast?" + urllib.parse.urlencode({
+        "latitude": st["latitude"], "longitude": st["longitude"], "timezone": "auto", "forecast_days": 3,
+        "current": "temperature_2m,relative_humidity_2m,apparent_temperature,precipitation,weather_code,wind_speed_10m",
+        "daily": "temperature_2m_max,temperature_2m_min,precipitation_probability_max,weather_code",
+    }))
+    code, body = http_request(url, timeout=8)
+    try:
+        j = json.loads(body) if code == 200 else None
+    except Exception:
+        j = None
+    if not j:
+        return {"ok": False, "error": f"Open-Meteo HTTP {code}", "city": st["city"]}
+    cur, daily = j.get("current", {}), j.get("daily", {})
+    days = []
+    for i, dt in enumerate(daily.get("time", [])[:3]):
+        days.append({
+            "date": dt, "max": daily.get("temperature_2m_max", [None] * 3)[i],
+            "min": daily.get("temperature_2m_min", [None] * 3)[i],
+            "rain": daily.get("precipitation_probability_max", [None] * 3)[i],
+            "desc": WMO_PT.get(int(daily.get("weather_code", [0] * 3)[i] or 0), "tempo variável"),
+        })
+    out = {
+        "ok": True, "city": st["city"], "temp": cur.get("temperature_2m"), "feels": cur.get("apparent_temperature"),
+        "humidity": cur.get("relative_humidity_2m"), "wind": cur.get("wind_speed_10m"),
+        "precip": cur.get("precipitation"), "desc": WMO_PT.get(int(cur.get("weather_code") or 0), "tempo variável"),
+        "days": days,
+    }
+    _WEATHER_CACHE.update({"ts": time.time(), "key": key, "data": out})
+    return out
+
+
+def _fmt_num(v: Any) -> str:
+    try:
+        return str(int(round(float(v))))
+    except Exception:
+        return "?"
+
+
+# ---------------------------------------------------------------- briefing matinal
+def build_briefing() -> Dict[str, Any]:
+    st = get_settings()
+    now = datetime.now()
+    nome = st.get("user_name") or "senhor"
+    saud = "Bom dia" if now.hour < 12 else ("Boa tarde" if now.hour < 18 else "Boa noite")
+    parts = [f"{saud}, {nome}. Hoje é {WEEKDAYS_PT[now.weekday()]}, {now.day} de {MONTHS_PT[now.month - 1]}, "
+             f"e agora são {now.hour} e {now.minute:02d}."]
+    sections: Dict[str, str] = {}
+    if st["briefing_weather"]:
+        w = get_weather()
+        if w.get("ok"):
+            t = (f"Em {w['city']}, {w['desc']}, {_fmt_num(w['temp'])} graus agora")
+            if w.get("days"):
+                d0 = w["days"][0]
+                t += f", máxima de {_fmt_num(d0['max'])} e mínima de {_fmt_num(d0['min'])}"
+                if d0.get("rain") is not None:
+                    t += f", com {_fmt_num(d0['rain'])} por cento de chance de chuva"
+            sections["clima"] = t + "."
+    if st["briefing_alarms"]:
+        alarms = load_data().get("alarms", []) or []
+        nowm = now.hour * 60 + now.minute
+        nxt = sorted((a for a in alarms if isinstance(a, dict) and int(a.get("h", 0)) * 60 + int(a.get("m", 0)) > nowm),
+                     key=lambda a: int(a.get("h", 0)) * 60 + int(a.get("m", 0)))
+        if nxt:
+            sections["alarmes"] = "Próximos alarmes de hoje: " + "; ".join(
+                f"{int(a.get('h', 0)):02d}:{int(a.get('m', 0)):02d}, {a.get('l', 'alarme')}" for a in nxt[:4]) + "."
+    if st["briefing_plan"]:
+        if st["briefing_plan_full"]:
+            res = handle_youversion_query({"action": "read_plan_day"})
+            if res.get("spoken"):
+                sections["biblia"] = "Agora, seu devocional de hoje. " + res["spoken"]
+        else:
+            yv = load_data()["youversion"]
+            sections["biblia"] = (f"Seu plano de leitura {yv.get('active_plan_title')} está no dia "
+                                  f"{yv.get('current_day')} de {yv.get('total_days')}.")
+    if st["briefing_verse"] and "biblia" not in sections:
+        v = fetch_youversion_votd_pt()
+        sections["versiculo"] = f"Versículo do dia, {v['reference']}: {v['text']}"
+    parts += [sections[k] for k in ("clima", "alarmes", "biblia", "versiculo") if k in sections]
+    parts.append("Tenha um ótimo dia." if now.hour < 18 else "Tenha uma boa noite.")
+    spoken = " ".join(parts)
+    log_event("briefing", f"Briefing gerado ({len(spoken)} caracteres)")
+    return {"ok": True, "action": "briefing", "spoken": spoken, "sections": sections,
+            "reference": "Briefing", "day": 0, "total_days": 0, "plan_title": ""}
+
+
+def preview_plan_day(plan_id: str, day: int) -> Dict[str, Any]:
+    """Le qualquer dia de qualquer plano sem alterar o progresso (para o painel)."""
+    data = load_data()
+    yv = data["youversion"]
+    up = next((p for p in yv.get("user_plans", []) if str(p.get("plan_id")) == str(plan_id)), None)
+    title = (up or {}).get("title") or yv.get("active_plan_title") or "Plano"
+    total = int((up or {}).get("total_days") or yv.get("total_days") or 0)
+    ref = plan_id or yv.get("active_plan_id", "")
+    res = yv_read_plan_day(yv, ref, max(1, day), title, total)
+    save_data(data)
+    if res:
+        tts_store_put("preview", res["spoken"])
+    if not res:
+        return {"ok": False, "error": "Nao consegui baixar esse dia."}
+    return {"ok": True, "title": title, "day": day, "total_days": total, **res}
+
+
+def build_state() -> Dict[str, Any]:
+    data = load_data()
+    yv, sp = data["youversion"], data["spotify"]
+    with DEVICE_LOCK:
+        dev = dict(DEVICE.get("info", {}))
+        convs = list(DEVICE.get("conversations", [])[-15:])
+        queue_len = len(DEVICE.get("queue", []))
+        last_seen = float(DEVICE.get("last_seen") or 0)
+    return {
+        "server": {"uptime": int(time.time() - SERVER_STARTED), "time": datetime.now().strftime("%d/%m/%Y %H:%M:%S")},
+        "device": {"online": device_online(), "last_seen_ago": int(time.time() - last_seen) if last_seen else None,
+                   "queue": queue_len, **dev},
+        "conversations": convs,
+        "youversion": {
+            "logged_in": bool(yv.get("access_token") or yv.get("refresh_token") or yv.get("session_cookie")),
+            "has_token": bool(yv.get("access_token")), "user": yv.get("full_name") or yv.get("username") or "",
+            "email": yv.get("email", ""), "auth_method": yv.get("auth_method", ""), "auth_error": yv.get("auth_error", ""),
+            "active_plan_id": yv.get("active_plan_id"), "active_plan_title": yv.get("active_plan_title"),
+            "current_day": yv.get("current_day"), "total_days": yv.get("total_days"), "version": yv.get("version", "NVI"),
+            "last_sync": yv.get("last_sync", ""), "sync_log": yv.get("sync_log", [])[-20:],
+            "plans": [{k: p.get(k) for k in ("plan_id", "title", "current_day", "total_days", "completed", "saved_only")}
+                      for p in yv.get("user_plans", []) or []],
+            "last_devotional": str(yv.get("last_devotional") or "")[:1500],
+        },
+        "spotify": {"connected": bool(sp.get("refresh_token")), "last_track": sp.get("last_track"),
+                    "client_id": sp.get("client_id", ""), "redirect_uri": sp.get("redirect_uri")},
+        "alarms": data.get("alarms", []),
+        "bible_history": data.get("bible_history", [])[:10],
+        "settings": get_settings(data),
+        "voices": PT_VOICES,
+    }
+
+
+def tts_preview_mp3(text: str, voice: str, rate: str) -> bytes:
+    import asyncio
+    import edge_tts
+
+    async def _go() -> bytes:
+        buf = bytearray()
+        async for ch in edge_tts.Communicate(text[:30000], voice, rate=rate).stream():
+            if ch["type"] == "audio":
+                buf.extend(ch["data"])
+        return bytes(buf)
+    return asyncio.run(_go())
+
+
+# ============================================================================
 # VOZ NEURAL EDGE-TTS EM STREAMING POR BLOCOS (TEXTOS LONGOS SEM TRUNCAR)
 # ============================================================================
 def split_text_for_tts(text: str, first_max: int = 240, max_len: int = 900) -> List[str]:
@@ -2008,14 +2374,14 @@ def split_text_for_tts(text: str, first_max: int = 240, max_len: int = 900) -> L
     return [c for c in chunks if c]
 
 
-def edge_tts_pcm16k(text: str, voice: str = "pt-BR-AntonioNeural") -> bytes:
+def edge_tts_pcm16k(text: str, voice: str = "pt-BR-AntonioNeural", rate: str = "+0%") -> bytes:
     """Sintetiza com Edge-TTS (MP3) e decodifica para PCM 16-bit 16 kHz mono via miniaudio."""
     import asyncio
     import edge_tts
     import miniaudio
 
     async def _synth() -> bytes:
-        comm = edge_tts.Communicate(text, voice)
+        comm = edge_tts.Communicate(text, voice, rate=rate)
         buf = bytearray()
         async for chunk in comm.stream():
             if chunk["type"] == "audio":
@@ -2050,14 +2416,17 @@ class JarvisBridgeHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(raw)
 
-    def _stream_tts(self, text: str, voice: str) -> None:
+    def _stream_tts(self, text: str, voice: str = "") -> None:
         """Envia PCM 16 kHz mono em blocos: o ESP32 comeca a falar no 1o bloco enquanto o resto e sintetizado."""
+        st = get_settings()
+        voice = voice or st["voice"]
+        rate = st["rate"]
         chunks = split_text_for_tts(text)
         if not chunks:
             self._send_json({"error": "Texto vazio para TTS"}, 400)
             return
         try:
-            first = edge_tts_pcm16k(chunks[0], voice)
+            first = edge_tts_pcm16k(chunks[0], voice, rate)
         except Exception as e:
             self._send_json({"error": f"Falha no Edge-TTS: {e}"}, 500)
             return
@@ -2074,17 +2443,30 @@ class JarvisBridgeHandler(BaseHTTPRequestHandler):
             self.wfile.write(first)
             if len(chunks) > 1:
                 with ThreadPoolExecutor(max_workers=1) as pool:
-                    fut = pool.submit(edge_tts_pcm16k, chunks[1], voice)
+                    fut = pool.submit(edge_tts_pcm16k, chunks[1], voice, rate)
                     for i in range(1, len(chunks)):
                         pcm = fut.result()
                         if i + 1 < len(chunks):
-                            fut = pool.submit(edge_tts_pcm16k, chunks[i + 1], voice)   # pre-sintetiza o proximo
+                            fut = pool.submit(edge_tts_pcm16k, chunks[i + 1], voice, rate)   # pre-sintetiza o proximo
                         self.wfile.write(pcm)
                         self.wfile.flush()
         except (BrokenPipeError, ConnectionResetError):
             print("[TTS] ESP32 interrompeu a reproducao (botao).")
         except Exception as e:
             print(f"[TTS] erro no bloco: {e}")
+
+    def _send_bytes(self, raw: bytes, ctype: str, status: int = 200) -> None:
+        self.send_response(status)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(raw)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def log_message(self, fmt: str, *args: Any) -> None:   # silencia o log de polling do painel
+        if "/api/state" in self.path or "/api/events" in self.path or "/api/device/heartbeat" in self.path:
+            return
+        super().log_message(fmt, *args)
 
     def _send_redirect(self, location: str) -> None:
         self.send_response(302)
@@ -2098,17 +2480,53 @@ class JarvisBridgeHandler(BaseHTTPRequestHandler):
         params = {k: v[0] for k, v in qs.items() if v}
 
         if path == "/":
+            try:
+                with open(PANEL_HTML_FILE, "rb") as f:
+                    self._send_bytes(f.read(), "text/html; charset=utf-8")
+            except OSError:
+                self._send_html(render_dashboard_html())
+        elif path == "/classic":
             self._send_html(render_dashboard_html())
+        elif path == "/api/state":
+            self._send_json(build_state())
+        elif path == "/api/events":
+            self._send_json({"events": get_events(int(params.get("after", "0") or 0))})
+        elif path == "/api/weather":
+            self._send_json(get_weather(params.get("force") == "1"))
+        elif path == "/api/settings":
+            self._send_json(get_settings())
+        elif path == "/api/voices":
+            self._send_json({"voices": PT_VOICES})
+        elif path == "/api/briefing":
+            res = build_briefing()
+            tts_store_put("last", res["spoken"])
+            self._send_json(compact_for_esp32(res) if params.get("client") == "esp32" else res)
+        elif path == "/api/bible/preview":
+            try:
+                pday = int(params.get("day", "1") or 1)
+            except ValueError:
+                pday = 1
+            self._send_json(preview_plan_day(params.get("plan", ""), pday))
+        elif path == "/api/tts/preview":
+            text = params.get("text", "").strip() or "Ola, eu sou o Jarvis."
+            if params.get("key"):
+                text = tts_store_get(params["key"]) or text
+            st = get_settings()
+            try:
+                mp3 = tts_preview_mp3(text, params.get("voice") or st["voice"], params.get("rate") or st["rate"])
+                self._send_bytes(mp3, "audio/mpeg")
+            except Exception as e:
+                self._send_json({"error": f"Edge-TTS indisponivel: {e}"}, 500)
         elif path == "/api/tts":
             text = params.get("text", "").strip()
-            if params.get("key") == "last":
-                text = str(load_data().get("last_spoken_tts", "")).strip()
-            self._stream_tts(text, params.get("voice", "pt-BR-AntonioNeural").strip())
+            if params.get("key"):
+                text = tts_store_get(params["key"]).strip()
+            log_event("tts", f"Voz para o ESP32: {len(text)} caracteres")
+            self._stream_tts(text, params.get("voice", "").strip())
         elif path == "/api/bible/youversion":
             res = handle_youversion_query(params)
-            d = load_data()
-            d["last_spoken_tts"] = res.get("spoken", "")   # texto COMPLETO para /api/tts?key=last
-            save_data(d)
+            tts_store_put("last", res.get("spoken", ""))   # texto COMPLETO para /api/tts?key=last
+            log_event("biblia", f"{res.get('action')}: {res.get('plan_title') or ''} dia {res.get('day')} ({params.get('client', 'painel')})")
             self._send_json(compact_for_esp32(res) if params.get("client") == "esp32" else res)
         elif path == "/youversion/sync":
             data = load_data()
@@ -2132,7 +2550,10 @@ class JarvisBridgeHandler(BaseHTTPRequestHandler):
             res = fetch_youversion_passage_pt(params.get("ref", "Salmos 23:1-4"), "NVI")
             self._send_json({"ok": True, "reference": res["reference"], "text": res["text"]})
         elif path == "/api/spotify":
-            self._send_json(handle_spotify_query(params))
+            res = handle_spotify_query(params)
+            if params.get("action") not in (None, "", "now_playing"):
+                log_event("spotify", res.get("message", ""))
+            self._send_json(res)
         elif path == "/api/alarms":
             data = load_data()
             self._send_json({"ok": True, "alarms": data.get("alarms", [])})
@@ -2192,9 +2613,25 @@ class JarvisBridgeHandler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", "0") or "0")
         raw_body = self.rfile.read(length).decode("utf-8", errors="replace") if length > 0 else ""
 
+        if parsed.path in ("/api/device/heartbeat", "/api/esp/send", "/api/settings"):
+            try:
+                body = json.loads(raw_body or "{}")
+                if not isinstance(body, dict):
+                    raise ValueError("JSON deve ser um objeto")
+            except Exception as e:
+                self._send_json({"ok": False, "error": f"JSON invalido: {e}"}, 400)
+                return
+            if parsed.path == "/api/device/heartbeat":
+                self._send_json(handle_heartbeat(body, self.client_address[0]))
+            elif parsed.path == "/api/esp/send":
+                self._send_json(esp_send(body))
+            else:
+                self._send_json({"ok": True, "settings": update_settings(body)})
+            return
+
         if parsed.path == "/api/tts":
             qs = {k: v[0] for k, v in urllib.parse.parse_qs(parsed.query).items() if v}
-            self._stream_tts(raw_body.strip(), qs.get("voice", "pt-BR-AntonioNeural"))
+            self._stream_tts(raw_body.strip(), qs.get("voice", ""))
             return
 
         if parsed.path == "/youversion/login":
@@ -2205,6 +2642,8 @@ class JarvisBridgeHandler(BaseHTTPRequestHandler):
                 self._send_redirect("/?youversion=missing")
                 return
             res = youversion_login_with_credentials(username, password)
+            log_event("biblia", f"Login YouVersion: {'OK, ' + str(res.get('plans_count')) + ' planos' if res.get('ok') else res.get('error')}",
+                      "info" if res.get("ok") else "error")
             if res.get("ok"):
                 self._send_redirect("/?youversion=ok")
             else:
@@ -2256,5 +2695,7 @@ if __name__ == "__main__":
     print("✨ 100% Python Padrao (Zero dependencias externas!)")
     print(f"👉 Painel Web & Login Spotify: http://127.0.0.1:{port}")
     print("👉 Conectado a https://www.bible.com/pt/reading-plans")
+    print(f"👉 Painel classico: http://127.0.0.1:{port}/classic")
+    log_event("servidor", f"Bridge Server iniciado na porta {port}")
     print("=================================================================")
     server.serve_forever()

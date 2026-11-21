@@ -120,3 +120,27 @@ O `external_server/jarvis_bridge_server.py` conecta na **sua conta** do App Bíb
 Exemplos: *"Jarvis, leia meu plano da Bíblia de hoje"*, *"Jarvis, avance para o próximo dia do meu plano"*, *"Jarvis, liste meus planos"*, *"Jarvis, ative o plano 2"*.
 
 > ⚠️ As APIs `*.youversionapi.com` usadas aqui **não são oficiais** (são as mesmas que o app usa). Podem mudar sem aviso, e o uso automatizado pode contrariar os termos do YouVersion. Use só na sua própria conta.
+
+---
+
+## 🖥️ Painel de Controle v2 (no PC) — `http://127.0.0.1:8080`
+
+O `jarvis_bridge_server.py` agora serve um painel completo (`external_server/web/panel.html`; o antigo continua em `/classic`):
+
+| Aba | O que tem |
+|---|---|
+| **Visão geral** | Status do ESP32 ao vivo (IP, RAM, WiFi, uptime, volume), clima de 3 dias, plano de hoje com barra de progresso, Spotify com capa, próximos alarmes e caixa de comando |
+| **Comandos & voz** | Histórico das conversas (voz e painel), "fazer o Jarvis falar" qualquer texto (longo inclusive), prévia da voz no navegador, troca de voz/velocidade do Edge-TTS, ações rápidas (briefing, testes L/R, microfone, reiniciar) |
+| **Bíblia** | Login/sync da conta YouVersion, planos com progresso, ativar plano, **leitor** de qualquer dia de qualquer plano (devocional + passagens) com "ouvir aqui" ou "falar no ESP32", busca de passagens, troca de tradução |
+| **Spotify** | Tocando agora (capa, progresso, dispositivo), controles, volume, busca por música/artista/álbum/playlist |
+| **Alarmes & notas** | Alarmes do ESP32 (adicionar/remover), timers rápidos e Pomodoro, lista de lembretes |
+| **Sistema** | Eventos ao vivo, configurações (nome, cidade/coordenadas do clima, IP do ESP32, conteúdo do briefing) |
+
+**Como o painel fala com o ESP32:** o ESP32 manda um *heartbeat* a cada 15 s (`POST /api/device/heartbeat`). Os comandos do painel vão direto para `http://<ip-do-esp32>/api/queue`; se o ESP estiver ocupado falando ou inacessível, ficam numa fila e são entregues no próximo heartbeat. No ESP32 os comandos são executados no `loop()`, então o HUD `http://jarvis.local` não trava mais enquanto o Jarvis fala.
+
+### Novas funções de voz
+- **Briefing do dia**: *"Jarvis, me dá o briefing"* → saudação, data, clima, próximos alarmes, devocional do plano (ou resumo) e versículo do dia. Configure o conteúdo na aba Sistema.
+- **Alarme devocional**: alarmes cujo rótulo tem *devocional*, *bíblia*, *briefing* ou *plano* tocam e em seguida leem o briefing com o plano do dia.
+- Sem o PC ligado, o briefing usa só clima + alarmes direto do ESP32.
+
+> ⚠️ O painel não tem senha: deixe a porta 8080 acessível apenas na sua rede local.

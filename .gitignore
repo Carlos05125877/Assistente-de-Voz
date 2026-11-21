@@ -9,3 +9,5 @@ __pycache__/
 *.pyc
 *.mp3
 *.wav
+external_server/jarvis_device.json
+external_server/*.tmp

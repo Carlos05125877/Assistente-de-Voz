@@ -1,0 +1,581 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>J.A.R.V.I.S. — Painel de Controle</title>
+<style>
+  :root{
+    --bg:#060a12; --panel:#0b1321; --panel2:#0f1a2c; --line:#1a2a42; --text:#e3eefc; --mute:#8aa3c2;
+    --cyan:#34e4ff; --cyan-d:rgba(52,228,255,.14); --green:#3ddc97; --amber:#ffc46b; --red:#ff5d73;
+    --r:12px; --mono:ui-monospace,SFMono-Regular,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--text);font:14px/1.45 system-ui,"Segoe UI",Roboto,sans-serif}
+  body{background:radial-gradient(1200px 600px at 80% -10%,rgba(52,228,255,.07),transparent 60%),var(--bg)}
+  a{color:var(--cyan)}
+  .app{display:grid;grid-template-columns:220px 1fr;min-height:100vh}
+  nav{border-right:1px solid var(--line);padding:18px 12px;position:sticky;top:0;height:100vh;background:rgba(6,10,18,.85)}
+  .brand{font-weight:800;letter-spacing:3px;color:var(--cyan);font-size:15px;padding:4px 10px 18px;text-shadow:0 0 14px rgba(52,228,255,.45)}
+  .brand small{display:block;letter-spacing:1px;color:var(--mute);font-weight:500;font-size:11px;margin-top:2px}
+  nav button{all:unset;display:flex;gap:10px;align-items:center;width:100%;box-sizing:border-box;padding:9px 12px;border-radius:9px;color:var(--mute);cursor:pointer;margin-bottom:2px}
+  nav button:hover{background:var(--panel2);color:var(--text)}
+  nav button.on{background:var(--cyan-d);color:var(--cyan);box-shadow:inset 2px 0 0 var(--cyan)}
+  nav .ico{width:20px;text-align:center}
+  main{padding:18px 24px 40px;min-width:0}
+  .top{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:18px}
+  .top h1{font-size:18px;margin:0 auto 0 0;font-weight:700}
+  .chip{display:inline-flex;align-items:center;gap:7px;border:1px solid var(--line);background:var(--panel);padding:5px 11px;border-radius:99px;font-size:12px;color:var(--mute)}
+  .dot{width:8px;height:8px;border-radius:50%;background:var(--mute)}
+  .dot.ok{background:var(--green);box-shadow:0 0 8px var(--green)} .dot.warn{background:var(--amber)} .dot.bad{background:var(--red)}
+  section{display:none} section.on{display:block}
+  .grid{display:grid;gap:16px;grid-template-columns:repeat(auto-fill,minmax(310px,1fr))}
+  .grid.two{grid-template-columns:repeat(auto-fit,minmax(380px,1fr))}
+  .card{background:linear-gradient(180deg,var(--panel2),var(--panel));border:1px solid var(--line);border-radius:var(--r);padding:16px;min-width:0}
+  .card h3{margin:0 0 12px;font-size:12px;letter-spacing:1.4px;text-transform:uppercase;color:var(--mute);display:flex;align-items:center;gap:8px}
+  .card h3 .r{margin-left:auto;text-transform:none;letter-spacing:0}
+  .big{font-size:34px;font-weight:700;line-height:1.1}
+  .muted{color:var(--mute)} .small{font-size:12px} .mono{font-family:var(--mono)}
+  .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:10px}
+  .row>.grow{flex:1;min-width:160px}
+  input,select,textarea{background:#070d18;border:1px solid #223652;color:var(--text);padding:8px 10px;border-radius:8px;font:inherit;outline:none}
+  input:focus,select:focus,textarea:focus{border-color:var(--cyan)}
+  textarea{width:100%;min-height:90px;resize:vertical}
+  .btn{display:inline-block;text-decoration:none;border:1px solid #29496f;background:#0f2036;color:var(--text);padding:8px 13px;border-radius:8px;cursor:pointer;font:inherit;font-weight:600;white-space:nowrap}
+  .btn:hover{border-color:var(--cyan);color:var(--cyan)}
+  .btn.pri{background:var(--cyan);border-color:var(--cyan);color:#03121c}
+  .btn.pri:hover{filter:brightness(1.1);color:#03121c}
+  .btn.danger{border-color:#5a2230;color:#ffb3bf} .btn.danger:hover{border-color:var(--red);color:var(--red)}
+  .btn.sm{padding:5px 9px;font-size:12px}
+  .btn:disabled{opacity:.5;cursor:wait}
+  .kv{display:grid;grid-template-columns:auto 1fr;gap:4px 12px;font-size:13px}
+  .kv span:nth-child(odd){color:var(--mute)}
+  .bar{height:7px;background:#13233a;border-radius:99px;overflow:hidden;margin-top:6px}
+  .bar>i{display:block;height:100%;background:linear-gradient(90deg,#1aa6c4,var(--cyan));border-radius:99px;transition:width .4s}
+  .list{list-style:none;margin:0;padding:0}
+  .list li{display:flex;gap:10px;align-items:center;padding:9px 0;border-bottom:1px solid var(--line)}
+  .list li:last-child{border-bottom:0}
+  .list .grow{flex:1;min-width:0}
+  .tag{font-size:11px;padding:2px 7px;border-radius:99px;border:1px solid var(--line);color:var(--mute)}
+  .tag.on{border-color:var(--cyan);color:var(--cyan)}
+  .log{background:#04080f;border:1px solid var(--line);border-radius:9px;padding:10px;font-family:var(--mono);font-size:12px;max-height:420px;overflow:auto;white-space:pre-wrap}
+  .log .e{padding:2px 0;border-bottom:1px dashed #0f1c2e}
+  .log .warn{color:var(--amber)} .log .error{color:var(--red)}
+  .reader{background:#070d18;border:1px solid var(--line);border-radius:9px;padding:14px;max-height:520px;overflow:auto;line-height:1.6;font-size:15px}
+  .reader h4{margin:14px 0 4px;color:var(--cyan);font-size:13px;letter-spacing:.5px}
+  .chat{max-height:380px;overflow:auto}
+  .msg{margin:8px 0;padding:9px 12px;border-radius:10px;max-width:92%}
+  .msg.u{background:#12243c;margin-left:auto} .msg.j{background:#0a1c22;border:1px solid #154553}
+  .msg small{display:block;color:var(--mute);font-size:11px;margin-bottom:2px}
+  .cover{width:96px;height:96px;border-radius:10px;background:#13233a center/cover;flex:none}
+  .toggle{display:flex;align-items:center;gap:8px;margin:6px 0;cursor:pointer}
+  .toggle input{width:16px;height:16px;accent-color:var(--cyan)}
+  .err{background:#2a0f17;border:1px solid #5a2230;color:#ffb3bf;padding:9px 11px;border-radius:8px;margin:8px 0;font-size:13px}
+  .hint{font-size:12px;color:var(--mute);margin-top:8px}
+  #toasts{position:fixed;right:18px;bottom:18px;display:flex;flex-direction:column;gap:8px;z-index:9}
+  .toast{background:#0e1c2f;border:1px solid var(--cyan);padding:10px 14px;border-radius:10px;max-width:380px;box-shadow:0 10px 30px rgba(0,0,0,.5);animation:in .2s}
+  .toast.bad{border-color:var(--red)}
+  @keyframes in{from{transform:translateY(8px);opacity:0}}
+  details summary{cursor:pointer;color:var(--cyan)}
+  @media (max-width:820px){.app{grid-template-columns:1fr}nav{position:static;height:auto;display:flex;flex-wrap:wrap;gap:4px;border-right:0;border-bottom:1px solid var(--line)}nav button{width:auto}.brand{width:100%;padding-bottom:8px}main{padding:14px}}
+</style>
+</head>
+<body>
+<div class="app">
+  <nav>
+    <div class="brand">J.A.R.V.I.S.<small>Painel de Controle</small></div>
+    <button data-tab="home" class="on"><span class="ico">◎</span>Visão geral</button>
+    <button data-tab="voice"><span class="ico">🎙</span>Comandos & voz</button>
+    <button data-tab="bible"><span class="ico">📖</span>Bíblia</button>
+    <button data-tab="spotify"><span class="ico">♫</span>Spotify</button>
+    <button data-tab="alarms"><span class="ico">⏰</span>Alarmes & notas</button>
+    <button data-tab="system"><span class="ico">⚙</span>Sistema</button>
+  </nav>
+  <main>
+    <div class="top">
+      <h1 id="title">Visão geral</h1>
+      <span class="chip"><span class="dot" id="dEsp"></span><span id="cEsp">ESP32</span></span>
+      <span class="chip"><span class="dot" id="dYv"></span>YouVersion</span>
+      <span class="chip"><span class="dot" id="dSp"></span>Spotify</span>
+      <span class="chip mono" id="cClock">--:--</span>
+    </div>
+
+    <!-- ================= VISAO GERAL ================= -->
+    <section id="home" class="on">
+      <div class="grid">
+        <div class="card">
+          <h3>ESP32 <span class="r small" id="hEspSeen"></span></h3>
+          <div class="kv" id="hEspKv"></div>
+          <div class="small muted" style="margin-top:10px">RAM livre</div><div class="bar"><i id="hHeap"></i></div>
+          <div class="small muted" style="margin-top:8px">Sinal WiFi</div><div class="bar"><i id="hRssi"></i></div>
+          <div class="row"><span class="small muted">Volume</span><input type="range" min="0" max="100" id="hVol" class="grow"><span id="hVolL" class="mono small">--</span></div>
+          <div class="row">
+            <button class="btn" onclick="esp({type:'mic'})">🎙 Ouvir microfone</button>
+            <button class="btn" onclick="esp({type:'test',mode:'chime'})">🔔 Testar som</button>
+          </div>
+        </div>
+
+        <div class="card">
+          <h3>Clima <span class="r small" id="hCity"></span></h3>
+          <div id="hWeather" class="muted">Carregando...</div>
+        </div>
+
+        <div class="card">
+          <h3>Plano de hoje <span class="r"><span class="tag" id="hVer">NVI</span></span></h3>
+          <div id="hPlanTitle" style="font-weight:600">—</div>
+          <div class="small muted" id="hPlanDay"></div>
+          <div class="bar"><i id="hPlanBar"></i></div>
+          <div class="row">
+            <button class="btn pri" onclick="espBible('read_plan_day')">🔊 Ler no Jarvis</button>
+            <button class="btn" onclick="openReader()">📄 Ver texto</button>
+            <button class="btn" onclick="espBible('next_plan_day')">⏭ Próximo dia</button>
+          </div>
+        </div>
+
+        <div class="card">
+          <h3>Spotify</h3>
+          <div style="display:flex;gap:12px;align-items:center">
+            <div class="cover" id="hCover"></div>
+            <div style="min-width:0"><div id="hTrack" style="font-weight:600">—</div><div class="small muted" id="hArtist"></div></div>
+          </div>
+          <div class="row">
+            <button class="btn sm" onclick="sp('previous')">⏮</button>
+            <button class="btn sm" onclick="sp('resume')">▶</button>
+            <button class="btn sm" onclick="sp('pause')">⏸</button>
+            <button class="btn sm" onclick="sp('next')">⏭</button>
+          </div>
+        </div>
+
+        <div class="card">
+          <h3>Próximos alarmes <span class="r"><button class="btn sm" onclick="go('alarms')">Gerenciar</button></span></h3>
+          <ul class="list" id="hAlarms"></ul>
+        </div>
+
+        <div class="card">
+          <h3>Fale com o Jarvis</h3>
+          <div class="row"><input class="grow" id="hAsk" placeholder="Ex: liga a luz da sala, qual o clima amanha..." onkeydown="if(event.key==='Enter')askFrom('hAsk')"><button class="btn pri" onclick="askFrom('hAsk')">Enviar</button></div>
+          <div class="row">
+            <button class="btn" onclick="esp({type:'briefing'})">☀️ Briefing no Jarvis</button>
+            <button class="btn" onclick="espBible('verse_of_day')">✨ Versículo do dia</button>
+          </div>
+          <div id="hLastConv" class="hint"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================= COMANDOS & VOZ ================= -->
+    <section id="voice">
+      <div class="grid two">
+        <div class="card">
+          <h3>Conversa com o Jarvis</h3>
+          <div class="chat" id="vChat"><div class="muted small">As conversas feitas por voz ou pelo painel aparecem aqui.</div></div>
+          <div class="row"><input class="grow" id="vAsk" placeholder="Digite um comando (passa pelo Gemini no ESP32)" onkeydown="if(event.key==='Enter')askFrom('vAsk')"><button class="btn pri" onclick="askFrom('vAsk')">Enviar</button></div>
+        </div>
+        <div class="card">
+          <h3>Fazer o Jarvis falar</h3>
+          <textarea id="vSay" placeholder="Texto que o Jarvis vai falar nos alto-falantes (pode ser longo)"></textarea>
+          <div class="row">
+            <button class="btn pri" onclick="sayEsp()">🔊 Falar no ESP32</button>
+            <button class="btn" onclick="previewTts(val('vSay'))">🎧 Ouvir aqui</button>
+          </div>
+          <div class="row">
+            <select id="vVoice" class="grow"></select>
+            <select id="vRate"><option value="-20%">Lento</option><option value="-10%">Calmo</option><option value="+0%">Normal</option><option value="+10%">Rápido</option><option value="+20%">Muito rapido</option></select>
+            <button class="btn" onclick="saveVoice()">Salvar voz</button>
+          </div>
+          <audio id="player" controls style="width:100%;margin-top:10px;display:none"></audio>
+        </div>
+        <div class="card">
+          <h3>Ações rápidas</h3>
+          <div class="row">
+            <button class="btn" onclick="esp({type:'briefing'})">☀️ Briefing</button>
+            <button class="btn" onclick="esp({type:'ask',text:'Como esta o clima agora?'})">🌦 Clima</button>
+            <button class="btn" onclick="esp({type:'ask',text:'Relatorio completo de status do sistema'})">📊 Status</button>
+            <button class="btn" onclick="esp({type:'mic'})">🎙 Microfone</button>
+          </div>
+          <div class="row">
+            <button class="btn" onclick="esp({type:'test',mode:'left'})">🔈 Esquerdo</button>
+            <button class="btn" onclick="esp({type:'test',mode:'right'})">🔊 Direito</button>
+            <button class="btn" onclick="esp({type:'test',mode:'chime'})">✨ Chime</button>
+            <button class="btn" onclick="esp({type:'test',mode:'alarm'})">🔔 Alarme</button>
+          </div>
+          <div class="row">
+            <button class="btn" onclick="esp({type:'ask',text:'Pausa a musica'})">⏸ Pausar música</button>
+            <button class="btn" onclick="esp({type:'ask',text:'Liga a luz da sala'})">💡 Luz da sala</button>
+            <button class="btn danger" onclick="if(confirm('Reiniciar o ESP32?'))esp({type:'restart'})">⟲ Reiniciar ESP32</button>
+          </div>
+          <div class="hint">Se o ESP32 não responder na hora, o comando fica na fila e é entregue no próximo heartbeat (até ~15 s).</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================= BIBLIA ================= -->
+    <section id="bible">
+      <div class="grid two">
+        <div class="card">
+          <h3>Conta YouVersion <span class="r small" id="bAcc"></span></h3>
+          <div id="bErr"></div>
+          <form action="/youversion/login" method="post" class="row">
+            <input class="grow" name="username" id="bUser" placeholder="E-mail ou usuário do App Bíblia" required>
+            <input class="grow" type="password" name="password" placeholder="Senha" required>
+            <button class="btn pri" type="submit">Entrar</button>
+          </form>
+          <div class="row">
+            <a class="btn" href="/youversion/sync">🔄 Sincronizar</a>
+            <button class="btn" onclick="espBible('sync')">🔄 Sincronizar pelo Jarvis</button>
+            <a class="btn" href="/youversion/debug" target="_blank">🩺 Diagnóstico</a>
+            <a class="btn danger" href="/youversion/logout">Sair</a>
+          </div>
+          <details style="margin-top:10px"><summary>Login com Google/Apple (colar token ou cookies)</summary>
+            <form action="/youversion/session" method="post" class="row">
+              <input class="grow" type="password" name="access_token" placeholder="Token Bearer / valor do cookie yva">
+              <input class="grow" type="password" name="session_cookie" placeholder="Cookies do bible.com (nome=valor; ...)">
+              <button class="btn" type="submit">Salvar</button>
+            </form>
+            <div class="hint">No navegador logado em www.bible.com: F12 → Application → Cookies → https://www.bible.com.</div>
+          </details>
+          <details style="margin-top:8px"><summary>Log da última sincronização <span id="bSync" class="small muted"></span></summary><div class="log" id="bLog"></div></details>
+        </div>
+
+        <div class="card">
+          <h3>Meus planos <span class="r"><select id="bVersion" onchange="setVersion(this.value)"><option>NVI</option><option>ARA</option><option>ARC</option><option>NVT</option></select></span></h3>
+          <ul class="list" id="bPlans"></ul>
+        </div>
+
+        <div class="card" style="grid-column:1/-1">
+          <h3>Leitor <span class="r small muted" id="rInfo"></span></h3>
+          <div class="row">
+            <select id="rPlan" class="grow"></select>
+            <span class="small muted">Dia</span><input type="number" id="rDay" min="1" value="1" style="width:80px">
+            <button class="btn pri" onclick="loadReader()">Carregar</button>
+            <button class="btn" onclick="previewTts('', readerKey)">🎧 Ouvir aqui</button>
+            <button class="btn" onclick="sayKeyEsp()">🔊 Falar no ESP32</button>
+          </div>
+          <div class="row">
+            <input class="grow" id="rRef" placeholder="Ou busque uma passagem: Salmos 23, João 3:16-18, Romanos 8:28" onkeydown="if(event.key==='Enter')loadPassage()">
+            <button class="btn" onclick="loadPassage()">Buscar passagem</button>
+          </div>
+          <div class="reader" id="rText" style="margin-top:12px"><span class="muted">Escolha um plano e um dia, ou busque uma passagem.</span></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================= SPOTIFY ================= -->
+    <section id="spotify">
+      <div class="grid two">
+        <div class="card">
+          <h3>Tocando agora <span class="r"><button class="btn sm" onclick="spNow()">Atualizar</button></span></h3>
+          <div style="display:flex;gap:16px;align-items:center">
+            <div class="cover" id="sCover" style="width:140px;height:140px"></div>
+            <div style="min-width:0;flex:1">
+              <div class="big" style="font-size:20px" id="sName">—</div>
+              <div class="muted" id="sArtist"></div>
+              <div class="small muted" id="sDev"></div>
+              <div class="bar"><i id="sProg"></i></div>
+              <div class="small muted mono" id="sTime"></div>
+            </div>
+          </div>
+          <div class="row">
+            <button class="btn" onclick="sp('previous')">⏮ Anterior</button>
+            <button class="btn pri" onclick="sp('resume')">▶ Tocar</button>
+            <button class="btn" onclick="sp('pause')">⏸ Pausar</button>
+            <button class="btn" onclick="sp('next')">⏭ Próxima</button>
+          </div>
+          <div class="row"><span class="small muted">Volume do Spotify</span><input type="range" min="0" max="100" value="60" class="grow" onchange="sp('volume','&volume='+this.value)"></div>
+        </div>
+        <div class="card">
+          <h3>Buscar e tocar</h3>
+          <div class="row">
+            <input class="grow" id="sQ" placeholder="Música, artista, album ou playlist" onkeydown="if(event.key==='Enter')spSearch()">
+            <select id="sType"><option value="track">Música</option><option value="artist">Artista</option><option value="album">Álbum</option><option value="playlist">Playlist</option></select>
+            <button class="btn pri" onclick="spSearch()">Tocar</button>
+          </div>
+          <div class="hint" id="sMsg"></div>
+          <details style="margin-top:14px"><summary>Conectar conta Spotify <span id="sConn" class="small muted"></span></summary>
+            <form action="/spotify/login" method="get" class="row">
+              <input class="grow" name="client_id" id="sCid" placeholder="Client ID" required>
+              <input class="grow" type="password" name="client_secret" placeholder="Client Secret" required>
+              <button class="btn" type="submit">Conectar</button>
+            </form>
+            <div class="hint">Redirect URI no Spotify Developer Dashboard: <code id="sRedir"></code></div>
+          </details>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================= ALARMES & NOTAS ================= -->
+    <section id="alarms">
+      <div class="grid two">
+        <div class="card">
+          <h3>Alarmes salvos no ESP32 (NVS)</h3>
+          <ul class="list" id="aList"></ul>
+          <div class="row">
+            <input type="time" id="aTime" value="07:00">
+            <input class="grow" id="aLabel" placeholder="Rótulo (ex: Devocional matinal)">
+            <label class="toggle small"><input type="checkbox" id="aDaily" checked>Diário</label>
+            <button class="btn pri" onclick="addAlarm()">Adicionar</button>
+          </div>
+          <div class="hint">Dica: alarmes com <b>devocional</b>, <b>biblia</b> ou <b>briefing</b> no rotulo tocam e em seguida leem o briefing com o plano do dia.</div>
+          <div class="row"><button class="btn danger sm" onclick="if(confirm('Apagar todos os alarmes?'))esp({type:'alarm_clear'})">Apagar todos</button></div>
+        </div>
+        <div class="card">
+          <h3>Timers</h3>
+          <div class="row">
+            <button class="btn" onclick="timer(60)">1 min</button>
+            <button class="btn" onclick="timer(300)">5 min</button>
+            <button class="btn" onclick="timer(600)">10 min</button>
+            <button class="btn" onclick="timer(1500)">Pomodoro 25</button>
+          </div>
+          <div class="row"><input type="number" id="tMin" min="1" value="15" style="width:90px"><span class="small muted">min</span><input class="grow" id="tLabel" placeholder="Rótulo"><button class="btn" onclick="timer(val('tMin')*60,val('tLabel'))">Criar</button></div>
+          <div class="hint" id="tActive"></div>
+        </div>
+        <div class="card">
+          <h3>Lembretes / lista</h3>
+          <div id="nList" class="muted">—</div>
+          <div class="row"><input class="grow" id="nText" placeholder="Novo lembrete" onkeydown="if(event.key==='Enter')addNote()"><button class="btn pri" onclick="addNote()">Adicionar</button><button class="btn danger" onclick="if(confirm('Limpar a lista?'))esp({type:'notes_clear'})">Limpar</button></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================= SISTEMA ================= -->
+    <section id="system">
+      <div class="grid two">
+        <div class="card">
+          <h3>Eventos ao vivo <span class="r"><select id="eFilter" onchange="renderEvents()"><option value="">Todos</option><option>esp32</option><option>voz</option><option>painel</option><option>biblia</option><option>tts</option><option>spotify</option><option>briefing</option><option>config</option></select></span></h3>
+          <div class="log" id="eLog"></div>
+        </div>
+        <div class="card">
+          <h3>Configurações</h3>
+          <div class="row"><span class="small muted" style="width:120px">Seu nome</span><input class="grow" id="cfg_user_name" placeholder="Como o Jarvis te chama (vazio = senhor)"></div>
+          <div class="row"><span class="small muted" style="width:120px">Cidade (clima)</span><input class="grow" id="cfg_city"></div>
+          <div class="row"><span class="small muted" style="width:120px">Lat / Lon</span><input class="grow" id="cfg_latitude"><input class="grow" id="cfg_longitude"></div>
+          <div class="row"><span class="small muted" style="width:120px">IP do ESP32</span><input class="grow" id="cfg_esp_ip" placeholder="vazio = automatico (heartbeat)"></div>
+          <div style="margin-top:12px" class="small muted">O briefing inclui:</div>
+          <label class="toggle"><input type="checkbox" id="cfg_briefing_weather">Clima</label>
+          <label class="toggle"><input type="checkbox" id="cfg_briefing_alarms">Próximos alarmes</label>
+          <label class="toggle"><input type="checkbox" id="cfg_briefing_plan">Plano de leitura</label>
+          <label class="toggle"><input type="checkbox" id="cfg_briefing_plan_full">Ler o devocional completo</label>
+          <label class="toggle"><input type="checkbox" id="cfg_briefing_verse">Versículo do dia</label>
+          <div class="row">
+            <button class="btn pri" onclick="saveSettings()">Salvar</button>
+            <button class="btn" onclick="testBriefing()">Gerar briefing (texto)</button>
+            <button class="btn" onclick="esp({type:'briefing'})">☀️ Briefing no Jarvis</button>
+          </div>
+          <div class="reader small" id="cBrief" style="display:none;margin-top:10px"></div>
+        </div>
+        <div class="card">
+          <h3>Servidor</h3>
+          <div class="kv" id="sysKv"></div>
+          <div class="row"><a class="btn" href="/classic">Painel clássico</a><a class="btn" href="/youversion/debug" target="_blank">Diagnóstico YouVersion</a><a class="btn" href="/api/state" target="_blank">Estado (JSON)</a></div>
+        </div>
+      </div>
+    </section>
+  </main>
+</div>
+<div id="toasts"></div>
+
+<script>
+const $ = id => document.getElementById(id);
+const val = id => ($(id).value || '').trim();
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+let S = null, events = [], lastEv = 0, evInit = false, readerKey = 'preview';
+
+function toast(msg, bad){ const t=document.createElement('div'); t.className='toast'+(bad?' bad':''); t.textContent=msg; $('toasts').appendChild(t); setTimeout(()=>t.remove(), 4200); }
+async function api(path, opts={}){
+  try{
+    const r = await fetch(path, opts);
+    const ct = r.headers.get('content-type')||'';
+    const d = ct.includes('json') ? await r.json() : await r.text();
+    if(!r.ok){ toast((d && d.error) || ('Erro HTTP '+r.status), true); return null; }
+    return d;
+  }catch(e){ toast('Servidor indisponível: '+e.message, true); return null; }
+}
+const post = (path, body) => api(path, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
+
+// ---------- navegacao
+const TITLES={home:'Visão geral',voice:'Comandos & voz',bible:'Bíblia',spotify:'Spotify',alarms:'Alarmes & notas',system:'Sistema'};
+function go(tab){
+  document.querySelectorAll('nav button').forEach(b=>b.classList.toggle('on', b.dataset.tab===tab));
+  document.querySelectorAll('section').forEach(s=>s.classList.toggle('on', s.id===tab));
+  $('title').textContent = TITLES[tab]; history.replaceState(null,'','#'+tab);
+  if(tab==='spotify') spNow();
+}
+document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>go(b.dataset.tab));
+
+// ---------- comandos para o ESP32
+async function esp(cmd){
+  const d = await post('/api/esp/send', cmd);
+  if(d && d.ok) toast(d.delivered==='direct' ? 'Enviado ao Jarvis ✓' : 'ESP32 ocupado/offline: comando na fila');
+  else if(d) toast(d.error||'Falha', true);
+}
+const espBible = action => esp({type:'bible', action});
+function askFrom(id){ const t=val(id); if(!t) return; $(id).value=''; esp({type:'ask', text:t}); }
+function sayEsp(){ const t=val('vSay'); if(!t) return toast('Digite um texto', true); esp({type:'speak', text:t}); }
+function sayKeyEsp(){ esp({type:'say_key', key:readerKey, text: ($('rText').innerText||'').slice(0,280)}); }
+function timer(sec, label){ sec=parseInt(sec,10); if(!sec) return; esp({type:'timer', sec, label: label||('timer de '+Math.round(sec/60)+' minutos')}); }
+function addAlarm(){ const [h,m]=(val('aTime')||'07:00').split(':'); esp({type:'alarm_add', h:+h, m:+m, label: val('aLabel')||'Despertador', r: $('aDaily').checked}); }
+function addNote(){ const t=val('nText'); if(!t) return; $('nText').value=''; esp({type:'note_add', text:t}); }
+
+function previewTts(text, key){
+  const st = S?.settings || {};
+  const voice = $('vVoice').value || st.voice, rate = $('vRate').value || st.rate;
+  let q = key ? 'key='+encodeURIComponent(key) : 'text='+encodeURIComponent(text||'Olá, eu sou o Jarvis.');
+  const p=$('player'); p.style.display='block'; p.src='/api/tts/preview?'+q+'&voice='+encodeURIComponent(voice)+'&rate='+encodeURIComponent(rate); p.play().catch(()=>{});
+  if(!$('voice').classList.contains('on')) toast('Gerando áudio... (player na aba Comandos & voz)');
+}
+async function saveVoice(){ const d=await post('/api/settings',{voice:$('vVoice').value, rate:$('vRate').value}); if(d) toast('Voz salva'); }
+
+// ---------- spotify
+async function sp(action, extra=''){ const d=await api('/api/spotify?action='+action+extra); if(d){ toast(d.message); setTimeout(spNow, 900);} }
+async function spSearch(){ const q=val('sQ'); if(!q) return; $('sMsg').textContent='Buscando...'; const d=await api('/api/spotify?action=play_query&q='+encodeURIComponent(q)+'&type='+$('sType').value); if(d){ $('sMsg').textContent=d.message; setTimeout(spNow,1200);} }
+const mmss = ms => { const s=Math.floor((ms||0)/1000); return Math.floor(s/60)+':'+String(s%60).padStart(2,'0'); };
+async function spNow(){
+  if(!S?.spotify?.connected) return;
+  const d = await api('/api/spotify?action=now_playing'); if(!d) return;
+  const img = d.image ? `url("${d.image}")` : '';
+  ['hCover','sCover'].forEach(i=>$(i).style.backgroundImage=img);
+  $('hTrack').textContent = $('sName').textContent = d.name || d.track || 'Nada tocando';
+  $('hArtist').textContent = $('sArtist').textContent = d.artist ? d.artist + (d.album?' — '+d.album:'') : '';
+  $('sDev').textContent = d.device ? (d.is_playing?'▶ ':'⏸ ')+'em '+d.device : '';
+  $('sProg').style.width = d.duration_ms ? (100*d.progress_ms/d.duration_ms)+'%' : '0';
+  $('sTime').textContent = d.duration_ms ? mmss(d.progress_ms)+' / '+mmss(d.duration_ms) : '';
+}
+
+// ---------- biblia
+async function setVersion(v){ await api('/api/bible/youversion?action=verse_of_day&version='+v); toast('Tradução: '+v); refresh(); }
+function openReader(){ go('bible'); if(S){ $('rPlan').value=S.youversion.active_plan_id||''; $('rDay').value=S.youversion.current_day||1; } loadReader(); }
+function renderReading(d){
+  let h = `<div style="font-weight:700;font-size:16px">${esc(d.title||'')}</div>`;
+  if(d.day) h += `<div class="small muted">Dia ${d.day}${d.total_days?' de '+d.total_days:''} · fonte: ${esc(d.source||'')}</div>`;
+  if(d.devotional) h += `<h4>DEVOCIONAL</h4><div>${esc(d.devotional)}</div>`;
+  (d.readings||[]).forEach(r=> h += `<h4>${esc(r.label)}</h4><div>${esc(r.text)}</div>`);
+  if(d.url) h += `<div class="hint"><a href="${esc(d.url)}" target="_blank">Abrir no bible.com ↗</a></div>`;
+  $('rText').innerHTML = h;
+}
+async function loadReader(){
+  const plan=$('rPlan').value, day=parseInt($('rDay').value||'1',10);
+  $('rText').innerHTML='<span class="muted">Baixando do YouVersion...</span>';
+  const d=await api(`/api/bible/preview?plan=${encodeURIComponent(plan)}&day=${day}`);
+  if(!d) return;
+  if(!d.ok){ $('rText').innerHTML=`<div class="err">${esc(d.error)}</div>`; return; }
+  renderReading(d); readerKey = 'preview'; $('rInfo').textContent = (d.spoken||'').length+' caracteres';
+}
+async function loadPassage(){
+  const ref=val('rRef'); if(!ref) return;
+  const d=await api('/api/bible/youversion?action=get_passage&ref='+encodeURIComponent(ref)); if(!d) return;
+  renderReading({title:d.reference, readings:[{label:d.reference, text:d.text}], url:d.url});
+  readerKey = 'last';
+}
+async function activatePlan(id){ const d=await api('/api/bible/youversion?action=start_plan&plan='+encodeURIComponent(id)); if(d){ toast('Plano ativo: '+(d.plan_title||'')); refresh(); } }
+function readPlanDay(id, day){ $('rPlan').value=id; $('rDay').value=day; loadReader(); $('rText').scrollIntoView({behavior:'smooth'}); }
+
+// ---------- configuracoes
+const CFG=['user_name','city','latitude','longitude','esp_ip','briefing_weather','briefing_alarms','briefing_plan','briefing_plan_full','briefing_verse'];
+function fillSettings(st){ CFG.forEach(k=>{ const el=$('cfg_'+k); if(!el || document.activeElement===el) return; if(el.type==='checkbox') el.checked=!!st[k]; else el.value=st[k]??''; }); }
+async function saveSettings(){ const b={}; CFG.forEach(k=>{ const el=$('cfg_'+k); b[k]= el.type==='checkbox'? el.checked : el.value; }); const d=await post('/api/settings',b); if(d){ toast('Configurações salvas'); loadWeather(true);} }
+async function testBriefing(){ $('cBrief').style.display='block'; $('cBrief').textContent='Gerando...'; const d=await api('/api/briefing'); if(d) $('cBrief').textContent=d.spoken; }
+
+// ---------- clima
+async function loadWeather(force){
+  const w = await api('/api/weather'+(force?'?force=1':'')); if(!w) return;
+  $('hCity').textContent = w.city||'';
+  if(!w.ok){ $('hWeather').innerHTML=`<span class="muted">${esc(w.error)}</span>`; return; }
+  const days=(w.days||[]).map((d,i)=>`<div style="flex:1"><div class="small muted">${i===0?'Hoje':i===1?'Amanhã':d.date.slice(8)+'/'+d.date.slice(5,7)}</div><div class="mono">${Math.round(d.max)}° / ${Math.round(d.min)}°</div><div class="small muted">☂ ${d.rain??'-'}% · ${esc(d.desc)}</div></div>`).join('');
+  $('hWeather').innerHTML = `<div style="display:flex;align-items:baseline;gap:10px"><div class="big">${Math.round(w.temp)}°</div><div>${esc(w.desc)}<div class="small muted">sensação ${Math.round(w.feels)}° · umidade ${w.humidity}% · vento ${Math.round(w.wind)} km/h</div></div></div><div class="row" style="gap:12px;margin-top:14px">${days}</div>`;
+}
+
+// ---------- render do estado
+const fmtUp = s => { s=+s||0; const d=Math.floor(s/86400), h=Math.floor(s%86400/3600), m=Math.floor(s%3600/60); return (d?d+'d ':'')+h+'h '+m+'m'; };
+function dot(id, cls){ $(id).className='dot '+cls; }
+function render(){
+  const s=S, dev=s.device, yv=s.youversion;
+  dot('dEsp', dev.online?'ok':(dev.last_seen_ago!=null?'bad':'warn'));
+  $('cEsp').textContent = dev.online ? 'ESP32 online' : (dev.last_seen_ago!=null ? 'ESP32 offline' : 'ESP32 nunca conectou');
+  dot('dYv', yv.has_token?'ok':(yv.logged_in?'warn':'bad'));
+  dot('dSp', s.spotify.connected?'ok':'bad');
+  $('cClock').textContent = s.server.time.slice(11,16);
+
+  // ESP32
+  $('hEspSeen').textContent = dev.last_seen_ago!=null ? 'visto há '+dev.last_seen_ago+' s' : '';
+  $('hEspKv').innerHTML = dev.ip ? `<span>IP</span><span class="mono">${esc(dev.ip)}</span><span>Uptime</span><span>${fmtUp(dev.uptime)}</span><span>RAM</span><span>${dev.heap??'?'} KB (min ${dev.min_heap??'?'} KB)</span><span>WiFi</span><span>${dev.rssi??'?'} dBm</span><span>Firmware</span><span>${esc(dev.fw||'?')}${dev.busy?' · ocupado':''}</span>${dev.queue?`<span>Fila</span><span>${dev.queue} comando(s)</span>`:''}`
+                               : '<span>Status</span><span class="muted">Aguardando o primeiro heartbeat do ESP32. Grave o firmware novo e confira EXTERNAL_SERVER_URL.</span>';
+  $('hHeap').style.width = Math.min(100, (dev.heap||0)/320*100)+'%';
+  $('hRssi').style.width = dev.rssi ? Math.max(0, Math.min(100, (dev.rssi+95)/60*100))+'%' : '0';
+  if(document.activeElement!==$('hVol') && dev.volume!=null){ $('hVol').value=dev.volume; $('hVolL').textContent=dev.volume+'%'; }
+
+  // plano
+  $('hPlanTitle').textContent = yv.active_plan_title || '—';
+  $('hPlanDay').textContent = `Dia ${yv.current_day||1} de ${yv.total_days||'?'}` + (yv.logged_in?'':' · conecte sua conta na aba Bíblia');
+  $('hPlanBar').style.width = yv.total_days ? (100*Math.max(0,(yv.current_day||1)-1)/yv.total_days)+'%' : '0';
+  $('hVer').textContent = yv.version; if(document.activeElement!==$('bVersion')) $('bVersion').value = yv.version;
+
+  // alarmes
+  const al = (s.alarms||[]).slice().sort((a,b)=>(a.h*60+a.m)-(b.h*60+b.m));
+  const now=new Date(), nm=now.getHours()*60+now.getMinutes();
+  const next = al.filter(a=>a.h*60+a.m>nm).concat(al.filter(a=>a.h*60+a.m<=nm));
+  const fmt = a => String(a.h).padStart(2,'0')+':'+String(a.m).padStart(2,'0');
+  $('hAlarms').innerHTML = next.slice(0,4).map(a=>`<li><span class="mono" style="font-size:18px">${fmt(a)}</span><span class="grow">${esc(a.l)}</span><span class="tag">${a.r?'diário':'único'}</span></li>`).join('') || '<li class="muted">Nenhum alarme</li>';
+  $('aList').innerHTML = al.map(a=>`<li><span class="mono" style="font-size:18px">${fmt(a)}</span><span class="grow">${esc(a.l)}</span><span class="tag">${a.r?'diário':'único'}</span><button class="btn sm danger" onclick="esp({type:'alarm_remove',h:${a.h},m:${a.m}})">Remover</button></li>`).join('') || '<li class="muted">Nenhum alarme salvo</li>';
+  $('tActive').textContent = dev.timers ? 'Timers ativos: '+dev.timers : '';
+  $('nList').innerHTML = dev.notes ? esc(dev.notes).split(/;\s*/).map(n=>'• '+n).join('<br>') : '<span class="muted">Lista vazia</span>';
+
+  // conversas
+  const conv = s.conversations||[];
+  const lc = conv[conv.length-1];
+  $('hLastConv').innerHTML = lc ? `<b>Voce:</b> ${esc(lc.user)}<br><b>Jarvis:</b> ${esc(lc.reply).slice(0,260)}` : '';
+  $('vChat').innerHTML = conv.map(c=>`<div class="msg u"><small>${esc(c.time)}</small>${esc(c.user)}</div><div class="msg j"><small>Jarvis</small>${esc(c.reply)}</div>`).join('') || '<div class="muted small">As conversas feitas por voz ou pelo painel aparecem aqui.</div>';
+
+  // youversion
+  $('bAcc').innerHTML = yv.has_token ? `<span class="tag on">conectado: ${esc(yv.user||yv.email)} · ${esc(yv.auth_method)}</span>` : (yv.logged_in?'<span class="tag">sessão sem token</span>':'<span class="tag">não conectado</span>');
+  $('bErr').innerHTML = yv.auth_error ? `<div class="err">${esc(yv.auth_error)}</div>` : '';
+  if(document.activeElement!==$('bUser')) $('bUser').value = yv.email||'';
+  $('bSync').textContent = yv.last_sync ? '('+yv.last_sync+')' : '';
+  $('bLog').textContent = (yv.sync_log||[]).join('\n') || '(vazio)';
+  const plans = yv.plans||[];
+  $('bPlans').innerHTML = plans.map(p=>{
+    const act = String(p.plan_id)===String(yv.active_plan_id);
+    const pct = p.total_days ? Math.round(100*Math.max(0,(p.current_day||1)-1)/p.total_days) : 0;
+    return `<li><div class="grow"><div style="font-weight:600">${act?'▶ ':''}${esc(p.title)}</div><div class="small muted">Dia ${p.current_day} de ${p.total_days}${p.completed?' · concluído':''}${p.saved_only?' · salvo':''}</div><div class="bar"><i style="width:${pct}%"></i></div></div>
+      <button class="btn sm" onclick="readPlanDay('${esc(p.plan_id)}',${p.current_day||1})">Ler</button>${act?'<span class="tag on">ativo</span>':`<button class="btn sm" onclick="activatePlan('${esc(p.plan_id)}')">Ativar</button>`}</li>`;
+  }).join('') || '<li class="muted">Nenhum plano sincronizado. Entre na sua conta ao lado.</li>';
+  const sel=$('rPlan'), cur=sel.value;
+  const opts = (plans.length?plans:[{plan_id:yv.active_plan_id,title:yv.active_plan_title}]).map(p=>`<option value="${esc(p.plan_id)}">${esc(p.title)}</option>`).join('');
+  if(sel.dataset.sig!==opts){ sel.innerHTML=opts; sel.dataset.sig=opts; sel.value = cur || yv.active_plan_id || ''; }
+
+  // spotify
+  $('sConn').textContent = s.spotify.connected ? '(conectado)' : '(não conectado)';
+  $('sRedir').textContent = s.spotify.redirect_uri||''; if(document.activeElement!==$('sCid')) $('sCid').value = s.spotify.client_id||'';
+  if(!s.spotify.connected){ $('hTrack').textContent='Spotify não conectado'; }
+
+  // voz / config
+  const vs=$('vVoice'); if(!vs.options.length){ vs.innerHTML=(s.voices||[]).map(v=>`<option value="${v.id}">${esc(v.label)}</option>`).join(''); vs.value=s.settings.voice; $('vRate').value=s.settings.rate; }
+  fillSettings(s.settings);
+  $('sysKv').innerHTML = `<span>Hora do servidor</span><span>${esc(s.server.time)}</span><span>Uptime</span><span>${fmtUp(s.server.uptime)}</span><span>Voz</span><span>${esc(s.settings.voice)} (${esc(s.settings.rate)})</span><span>Histórico Bíblia</span><span>${(s.bible_history||[]).map(h=>esc(h.reference)).join(', ')||'—'}</span>`;
+}
+async function refresh(){ const d=await api('/api/state'); if(d){ S=d; render(); } }
+
+// ---------- eventos
+function renderEvents(){
+  const f=$('eFilter').value;
+  $('eLog').innerHTML = events.filter(e=>!f||e.kind===f).slice(-250).reverse().map(e=>`<div class="e ${e.level}">${e.time} [${esc(e.kind)}] ${esc(e.msg)}</div>`).join('') || '<span class="muted">Sem eventos ainda.</span>';
+}
+async function pollEvents(){
+  try{ const r=await fetch('/api/events?after='+lastEv); const d=await r.json();
+    if(d.events.length){ events=events.concat(d.events).slice(-400); lastEv=d.events[d.events.length-1].id; renderEvents();
+      if(evInit) d.events.filter(e=>e.kind==='voz'||e.level==='error').forEach(e=>toast(e.msg.slice(0,140), e.level==='error')); }
+    evInit = true;
+  }catch(e){}
+}
+
+// ---------- inicio
+$('hVol').oninput = e => $('hVolL').textContent = e.target.value+'%';
+$('hVol').onchange = e => esp({type:'volume', v:+e.target.value});
+const qs = new URLSearchParams(location.search);
+if(qs.get('youversion')){ const m={ok:'Conta YouVersion conectada!',error:'Falha no login do YouVersion (veja o erro na aba Bíblia)',synced:'Planos sincronizados',logout:'Desconectado do YouVersion',session_ok:'Sessão salva',missing:'Preencha usuário e senha'}; toast(m[qs.get('youversion')]||'OK', qs.get('youversion')==='error'); history.replaceState(null,'','/#bible'); }
+if(qs.get('spotify')){ toast('Spotify conectado!'); history.replaceState(null,'','/#spotify'); }
+go((location.hash||'#home').slice(1) in TITLES ? (location.hash||'#home').slice(1) : 'home');
+refresh(); loadWeather(); pollEvents(); setTimeout(spNow, 800);
+setInterval(refresh, 4000); setInterval(pollEvents, 2500); setInterval(spNow, 15000); setInterval(()=>loadWeather(false), 600000);
+</script>
+</body>
+</html>

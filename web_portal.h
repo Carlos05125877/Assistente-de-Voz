@@ -11,6 +11,7 @@
 #include "bible_client.h"
 #include "jarvis_features.h"
 #include "gemini_agent.h"
+#include "bridge_link.h"
 
 // ============================================================================
 // PAINEL WEB HUD DO J.A.R.V.I.S. (SERVIDOR HTTP EMBARCADO NO ESP-WROOM-32)
@@ -52,7 +53,10 @@ static const char JARVIS_HUD_HTML[] PROGMEM = R"rawliteral(
 <body>
   <div class="header">
     <div class="title">J.A.R.V.I.S. // SISTEMA COMPLETO ESP32</div>
-    <div class="badge" id="statusBadge">ONLINE</div>
+    <div style="display:flex;gap:8px;align-items:center">
+      <a class="badge" id="bridgeLink" href="#" target="_blank" style="text-decoration:none;display:none">🖥️ Painel completo (PC)</a>
+      <div class="badge" id="statusBadge">ONLINE</div>
+    </div>
   </div>
 
   <div class="grid">
@@ -65,7 +69,7 @@ static const char JARVIS_HUD_HTML[] PROGMEM = R"rawliteral(
       </div>
       <div class="row">
         <button onclick="triggerMic()">🎙️ Ouvir Microfone do ESP32</button>
-        <button onclick="sendQuick('Bom dia Jarvis, me de o briefing com clima, alarmes e versiculo do dia')">☀️ Briefing Completo</button>
+        <button onclick="queueCmd('briefing')">☀️ Briefing do Dia</button>
       </div>
       <div class="log-box" id="replyBox">Aguardando ordens, senhor...</div>
     </div>
@@ -97,10 +101,10 @@ static const char JARVIS_HUD_HTML[] PROGMEM = R"rawliteral(
         <button onclick="bibleAction('verse_of_day','',1)">✨ Versiculo do Dia</button>
       </div>
       <div class="row">
-        <button onclick="bibleStartPlan('ansiedade')">🕊️ Plano Ansiedade & Paz</button>
-        <button onclick="bibleStartPlan('sabedoria')">💡 Plano Proverbios</button>
-        <button onclick="bibleStartPlan('esperanca')">🔥 Plano Esperanca</button>
-        <button onclick="bibleStartPlan('gratidao')">🙌 Plano Gratidao</button>
+        <button onclick="bibleAction('list_plans','',1)">📋 Meus Planos</button>
+        <button onclick="bibleAction('sync','',1)">🔄 Sincronizar Conta</button>
+        <input type="text" id="planPick" placeholder="Ativar plano (nome ou numero)" />
+        <button onclick="bibleStartPlan(document.getElementById('planPick').value)">Ativar</button>
       </div>
       <div class="row">
         <input type="text" id="bibleRef" placeholder="Ex: Salmos 23:1-4 ou URL bible.com/pt/reading-plans/..." />
@@ -168,20 +172,36 @@ static const char JARVIS_HUD_HTML[] PROGMEM = R"rawliteral(
         }
         document.getElementById('bibleBox').innerText = `${d.bibleRef}\n${d.bibleText}`;
         document.getElementById('telemetryBox').innerText =
-          `Horario: ${d.time}\nRAM Livre: ${d.freeHeapKb} KB | WiFi: ${d.rssi} dBm\nNotas: ${d.notes}`;
+          `Horario: ${d.time} | Uptime: ${Math.floor(d.uptime/3600)}h ${Math.floor(d.uptime%3600/60)}m\nIP: ${d.ip} | Firmware ${d.fw}\nRAM Livre: ${d.freeHeapKb} KB | WiFi: ${d.rssi} dBm\nNotas: ${d.notes}`;
+        document.getElementById('statusBadge').innerText = d.busy ? 'FALANDO...' : 'ONLINE';
+        const bl = document.getElementById('bridgeLink');
+        if (d.bridge && d.bridge.length > 8) { bl.href = d.bridge; bl.style.display = 'inline-block'; bl.style.opacity = d.bridgeOnline ? 1 : 0.45; }
         if (d.lastReply) {
           document.getElementById('replyBox').innerText = `Voce: ${d.lastUser}\nJarvis: ${d.lastReply}`;
         }
       } catch (e) {}
     }
+    // Comandos vao para a fila do ESP32 (o servidor responde na hora; a resposta chega pelo /api/status)
+    let lastReplySeen = '';
+    async function queueCmd(type, params = {}) {
+      const qs = new URLSearchParams({type, ...params}).toString();
+      const r = await fetch('/api/queue?' + qs);
+      if (!r.ok) { document.getElementById('replyBox').innerText = 'Fila cheia, aguarde o Jarvis terminar.'; return false; }
+      return true;
+    }
+    async function waitReply(boxId, field) {
+      for (let i = 0; i < 40; i++) {
+        await new Promise(res => setTimeout(res, 1500));
+        const d = await (await fetch('/api/status')).json();
+        const v = field === 'bible' ? `${d.bibleRef}\n${d.bibleText}` : d.lastReply;
+        if (v && v !== lastReplySeen) { lastReplySeen = v; document.getElementById(boxId).innerText = field === 'bible' ? v : `Voce: ${d.lastUser}\nJarvis: ${d.lastReply}`; return; }
+      }
+    }
     async function sendCommand() {
       const q = document.getElementById('cmdInput').value.trim();
       if (!q) return;
       document.getElementById('replyBox').innerText = 'Processando com Gemini + TTS...';
-      const r = await fetch('/api/ask?q=' + encodeURIComponent(q));
-      const d = await r.json();
-      document.getElementById('replyBox').innerText = `Voce: ${q}\nJarvis: ${d.reply}`;
-      refreshStatus();
+      if (await queueCmd('ask', {text: q})) waitReply('replyBox', 'ask');
     }
     function sendQuick(text) {
       document.getElementById('cmdInput').value = text;
@@ -214,22 +234,19 @@ static const char JARVIS_HUD_HTML[] PROGMEM = R"rawliteral(
     }
     async function fetchBible(speak) {
       const ref = document.getElementById('bibleRef').value.trim() || 'Salmos 23:1-4';
-      document.getElementById('bibleBox').innerText = 'Consultando App Biblia (YouVersion)...';
       const isPlan = ref.includes('reading-plans') || ref.includes('bible.com') || /^\d+-/.test(ref);
-      const url = isPlan
-        ? `/api/bible?action=start_plan&theme=${encodeURIComponent(ref)}&speak=${speak ? 1 : 0}`
-        : `/api/bible?action=get_passage&ref=${encodeURIComponent(ref)}&speak=${speak ? 1 : 0}`;
-      const r = await fetch(url);
-      const d = await r.json();
-      document.getElementById('bibleBox').innerText = d.result;
-      refreshStatus();
+      if (!speak) {   // so leitura na tela: resposta direta
+        document.getElementById('bibleBox').innerText = 'Consultando App Biblia (YouVersion)...';
+        const r = await fetch(`/api/bible?action=${isPlan ? 'start_plan' : 'get_passage'}&ref=${encodeURIComponent(ref)}&theme=${encodeURIComponent(ref)}&speak=0`);
+        const d = await r.json();
+        document.getElementById('bibleBox').innerText = d.result;
+        return;
+      }
+      bibleAction(isPlan ? 'start_plan' : 'get_passage', ref, 1);
     }
     async function bibleAction(act, theme, speak) {
-      document.getElementById('bibleBox').innerText = 'Conectando ao App Biblia YouVersion (bible.com/pt/reading-plans)...';
-      const r = await fetch(`/api/bible?action=${encodeURIComponent(act)}&theme=${encodeURIComponent(theme)}&speak=${speak ? 1 : 0}`);
-      const d = await r.json();
-      document.getElementById('bibleBox').innerText = d.result;
-      refreshStatus();
+      document.getElementById('bibleBox').innerText = 'Conectando ao App Biblia YouVersion...';
+      if (await queueCmd('bible', {action: act, text: theme || ''})) waitReply('bibleBox', 'bible');
     }
     function bibleStartPlan(planKey) {
       bibleAction('start_plan', planKey, 1);
@@ -256,12 +273,208 @@ static const char JARVIS_HUD_HTML[] PROGMEM = R"rawliteral(
 </html>
 )rawliteral";
 
+// Comando vindo do HUD (/api/queue) ou do Painel de Controle no PC (heartbeat / push direto).
+// Os comandos sao enfileirados e executados no loop(), para o servidor web responder na hora
+// mesmo quando o Jarvis vai falar por varios minutos.
+struct PanelCmd {
+  String type, text, key, label, action, mode;
+  int h = -1, m = -1, v = -1, sec = 0;
+  bool r = true;
+};
+
 class JarvisWebPortal {
 public:
   WebServer server{80};
   bool remoteMicTriggered = false;
+  bool busy = false;
   String lastUserText = "";
   String lastJarvisReply = "";
+
+  static const int QMAX = 6;
+  PanelCmd queue[QMAX];
+  int qHead = 0, qCount = 0;
+
+  AudioManager* pAudio = nullptr;
+  SpotifyClient* pSpotify = nullptr;
+  SmartLifeClient* pSmart = nullptr;
+  BibleClient* pBible = nullptr;
+  JarvisFeatures* pJarvis = nullptr;
+  GeminiAgent* pGemini = nullptr;
+  WiFiClientSecure* pTls = nullptr;
+
+  uint32_t nextHeartbeatAt = 4000;
+  int heartbeatFails = 0;
+
+  bool enqueue(const PanelCmd& c) {
+    if (c.type.length() == 0) return false;
+    if (c.type == "mic") { remoteMicTriggered = true; return true; }   // nao precisa de fila
+    if (qCount >= QMAX) return false;
+    queue[(qHead + qCount) % QMAX] = c;
+    qCount++;
+    return true;
+  }
+
+  void enqueueFromJson(JsonObject o) {
+    PanelCmd c;
+    c.type   = o["type"] | "";
+    c.text   = o["text"] | "";
+    c.key    = o["key"] | "";
+    c.label  = o["label"] | "";
+    c.action = o["action"] | "";
+    c.mode   = o["mode"] | "";
+    c.h = o["h"] | -1;
+    c.m = o["m"] | -1;
+    c.v = o["v"] | -1;
+    c.sec = o["sec"] | 0;
+    c.r = o["r"].is<bool>() ? o["r"].as<bool>() : ((int)(o["r"] | 1) != 0);
+    enqueue(c);
+  }
+
+  PanelCmd cmdFromArgs() {
+    PanelCmd c;
+    c.type   = server.arg("type");
+    c.text   = server.arg("text");
+    c.key    = server.arg("key");
+    c.label  = server.arg("label");
+    c.action = server.arg("action");
+    c.mode   = server.arg("mode");
+    if (server.hasArg("h"))   c.h = server.arg("h").toInt();
+    if (server.hasArg("m"))   c.m = server.arg("m").toInt();
+    if (server.hasArg("v"))   c.v = server.arg("v").toInt();
+    if (server.hasArg("sec")) c.sec = server.arg("sec").toInt();
+    if (server.hasArg("r"))   c.r = (server.arg("r") != "0" && server.arg("r") != "false");
+    return c;
+  }
+
+  // Executa UM comando pendente por volta do loop()
+  void processQueue() {
+    if (qCount == 0 || pAudio == nullptr) return;
+    PanelCmd c = queue[qHead];
+    qHead = (qHead + 1) % QMAX;
+    qCount--;
+    busy = true;
+    runCommand(c);
+    busy = false;
+    nextHeartbeatAt = millis() + 300;   // painel ve o resultado rapido
+  }
+
+  void runCommand(const PanelCmd& c) {
+    AudioManager& audio = *pAudio;
+    WiFiClientSecure& tls = *pTls;
+    Serial.printf("🛰️ [Painel] Comando: %s\n", c.type.c_str());
+    if (c.type == "speak") {
+      audio.speakText(tls, c.text);
+    } else if (c.type == "say_key") {
+      String shortTxt = c.text.length() > 0 ? c.text : String("Lendo o texto do painel.");
+      BridgeLink::armTtsKey(c.key.length() > 0 ? c.key : String("last"), shortTxt);
+      audio.speakText(tls, shortTxt);
+    } else if (c.type == "ask" && c.text.length() > 0) {
+      String reply;
+      lastUserText = c.text;
+      if (!pGemini->processUserQuery(tls, c.text, reply, audio, *pSpotify, *pSmart, *pBible, *pJarvis)) {
+        reply = "Desculpe senhor, ocorreu uma falha ao consultar o Gemini.";
+      }
+      lastJarvisReply = reply;
+      audio.speakText(tls, reply);
+    } else if (c.type == "volume" && c.v >= 0) {
+      audio.setVolume(c.v);
+      audio.playSuccessBeep();
+    } else if (c.type == "alarm_add" && c.h >= 0 && c.m >= 0) {
+      lastJarvisReply = pJarvis->addAlarm(c.h, c.m, c.label.length() ? c.label : String("Despertador"), c.r);
+      audio.playSuccessBeep();
+    } else if (c.type == "alarm_remove") {
+      lastJarvisReply = pJarvis->removeAlarm(c.h, c.m, c.label);
+      audio.playSuccessBeep();
+    } else if (c.type == "alarm_clear") {
+      lastJarvisReply = pJarvis->clearAlarms();
+    } else if (c.type == "note_add" && c.text.length() > 0) {
+      lastJarvisReply = pJarvis->addNote(c.text);
+      audio.playSuccessBeep();
+    } else if (c.type == "notes_clear") {
+      lastJarvisReply = pJarvis->clearNotes();
+    } else if (c.type == "timer" && c.sec > 0) {
+      lastJarvisReply = pJarvis->addTimer(c.sec, c.label.length() ? c.label : String("timer"));
+      audio.playSuccessBeep();
+    } else if (c.type == "test") {
+      if (c.mode == "left")       audio.playToneStereo(660.0f, 350, -1.0f, 0.45f);
+      else if (c.mode == "right") audio.playToneStereo(880.0f, 350, +1.0f, 0.45f);
+      else if (c.mode == "alarm") audio.playAlarmSound();
+      else                        audio.playWakeChime();
+    } else if (c.type == "briefing") {
+      lastUserText = "Briefing";
+      lastJarvisReply = pJarvis->morningBriefing(tls);
+      audio.speakText(tls, lastJarvisReply);
+    } else if (c.type == "bible") {
+      String act = c.action.length() ? c.action : String("read_plan_day");
+      String res = pBible->executeCommand(tls, act, c.text, c.text, 0);
+      lastUserText = "Biblia: " + act;
+      lastJarvisReply = res;
+      audio.playSuccessBeep();
+      if (res.length() > 0) audio.speakText(tls, res);
+    } else if (c.type == "spotify") {
+      lastJarvisReply = pSpotify->executeCommand(tls, c.action.length() ? c.action : String("now_playing"), c.text, "track", c.v);
+    } else if (c.type == "restart") {
+      audio.playSuccessBeep();
+      delay(300);
+      ESP.restart();
+    }
+  }
+
+  // Heartbeat para o Painel de Controle no PC (a cada 15 s). A resposta traz comandos pendentes.
+  void tickHeartbeat() {
+    if (!BridgeLink::enabled() || pJarvis == nullptr || (int32_t)(millis() - nextHeartbeatAt) < 0) return;
+
+    DynamicJsonDocument doc(3072);
+    doc["ip"]       = WiFi.localIP().toString();
+    doc["heap"]     = ESP.getFreeHeap() / 1024;
+    doc["min_heap"] = ESP.getMinFreeHeap() / 1024;
+    doc["rssi"]     = WiFi.RSSI();
+    doc["uptime"]   = millis() / 1000;
+    doc["volume"]   = pAudio->volumePercent;
+    doc["fw"]       = JARVIS_FW_VERSION;
+    doc["busy"]     = busy;
+    doc["plan"]     = pBible->getActivePlanStatus();
+    doc["notes"]    = pJarvis->notesList.substring(0, 400);
+    doc["timers"]   = pJarvis->listActiveTimers();
+    doc["spotify"]  = pSpotify->lastTrackInfo;
+    doc["last_user"]  = lastUserText.substring(0, 200);
+    doc["last_reply"] = lastJarvisReply.substring(0, 500);
+    JsonArray al = doc.createNestedArray("alarms");
+    for (int i = 0; i < JarvisFeatures::MAX_ALARMS; ++i) {
+      if (!pJarvis->alarms[i].active) continue;
+      JsonObject a = al.createNestedObject();
+      a["h"] = pJarvis->alarms[i].hour;
+      a["m"] = pJarvis->alarms[i].minute;
+      a["r"] = pJarvis->alarms[i].repeatDaily;
+      a["l"] = pJarvis->alarms[i].label;
+    }
+    String body;
+    serializeJson(doc, body);
+    doc.clear();
+
+    HTTPClient http;
+    WiFiClient tcp;
+    bool ok = false;
+    if (http.begin(tcp, String(EXTERNAL_SERVER_URL) + "/api/device/heartbeat")) {
+      http.setConnectTimeout(1200);
+      http.setTimeout(2500);
+      http.addHeader("Content-Type", "application/json");
+      int code = http.POST(body);
+      if (code == 200) {
+        ok = true;
+        StaticJsonDocument<64> filter;
+        filter["commands"] = true;   // copia o array inteiro
+        DynamicJsonDocument resp(3072);
+        if (!deserializeJson(resp, http.getStream(), DeserializationOption::Filter(filter))) {
+          for (JsonObject o : resp["commands"].as<JsonArray>()) enqueueFromJson(o);
+        }
+      }
+      http.end();
+    }
+    heartbeatFails = ok ? 0 : heartbeatFails + 1;
+    // PC desligado: tenta com menos frequencia para nao travar o botao/loop
+    nextHeartbeatAt = millis() + (ok ? 15000UL : (heartbeatFails > 3 ? 120000UL : 30000UL));
+  }
 
   void begin(AudioManager& audio,
              SpotifyClient& spotify,
@@ -270,6 +483,8 @@ public:
              JarvisFeatures& jarvis,
              GeminiAgent& gemini,
              WiFiClientSecure& sharedTls) {
+    pAudio = &audio; pSpotify = &spotify; pSmart = &smartlife; pBible = &bible;
+    pJarvis = &jarvis; pGemini = &gemini; pTls = &sharedTls;
     if (MDNS.begin(HOSTNAME_MDNS)) {
       Serial.printf("🌐 [WebPortal] mDNS ativo: http://%s.local\n", HOSTNAME_MDNS);
     }
@@ -279,7 +494,7 @@ public:
     });
 
     server.on("/api/status", HTTP_GET, [this, &audio, &spotify, &bible, &jarvis]() {
-      DynamicJsonDocument doc(1536);
+      DynamicJsonDocument doc(2560);
       doc["volume"]       = audio.volumePercent;
       doc["freeHeapKb"]   = ESP.getFreeHeap() / 1024;
       doc["rssi"]         = WiFi.RSSI();
@@ -293,9 +508,23 @@ public:
       doc["bibleText"]    = bible.lastVerseText;
       doc["lastUser"]     = lastUserText;
       doc["lastReply"]    = lastJarvisReply;
+      doc["uptime"]       = millis() / 1000;
+      doc["ip"]           = WiFi.localIP().toString();
+      doc["busy"]         = busy || qCount > 0;
+      doc["fw"]           = JARVIS_FW_VERSION;
+      doc["bridge"]       = EXTERNAL_SERVER_URL;
+      doc["bridgeOnline"] = (heartbeatFails == 0 && BridgeLink::enabled());
       String out;
       serializeJson(doc, out);
       server.send(200, "application/json", out);
+    });
+
+    // Fila de comandos (usada pelo HUD e pelo Painel de Controle no PC)
+    server.on("/api/queue", HTTP_GET, [this]() {
+      PanelCmd c = cmdFromArgs();
+      bool ok = enqueue(c);
+      String out = String("{\"ok\":") + (ok ? "true" : "false") + ",\"queued\":" + String(qCount) + "}";
+      server.send(ok ? 200 : 503, "application/json", out);
     });
 
     server.on("/api/trigger_mic", HTTP_POST, [this]() {
