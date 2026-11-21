@@ -144,3 +144,21 @@ O `jarvis_bridge_server.py` agora serve um painel completo (`external_server/web
 - Sem o PC ligado, o briefing usa só clima + alarmes direto do ESP32.
 
 > ⚠️ O painel não tem senha: deixe a porta 8080 acessível apenas na sua rede local.
+
+---
+
+## ✦ Assistente pessoal (lembretes, listas, rotinas, notícias...)
+
+Tudo roda no PC (`jarvis_bridge_server.py`). O ESP32 só tem uma ferramenta nova no Gemini, a `assistant_tools`. Gerencie tudo na aba **Assistente** do painel.
+
+| Função | Exemplos de voz |
+|---|---|
+| **Lembretes agendados** (uma vez, diário, seg–sex, semanal). O PC dispara no horário; se o ESP32 estiver ocupado ou offline, o lembrete entra na fila | *"Jarvis, me lembra amanhã às 9 de pagar a conta de luz"* · *"daqui a 20 minutos tirar o bolo do forno"* · *"toda segunda às 19h aula de estrutura de dados"* · *"quais são meus lembretes?"* |
+| **Listas** com qualquer nome (compras, tarefas, farmácia...) | *"adiciona leite, pão e café na lista de compras"* · *"o que tem na lista de tarefas?"* · *"tira o pão da lista"* |
+| **Rotinas**: sequências de passos (falar, comando para o Jarvis, música, volume, esperar, briefing, Bíblia, lista, som), manuais ou em horário fixo | *"Jarvis, ativa a rotina boa noite"* · *"modo foco"* (já vêm as rotinas Bom dia, Boa noite e Foco) |
+| **Datas especiais** com contagem regressiva e idade | *"guarda o aniversário da minha mãe em 25 de novembro de 1970"* · *"quantos dias faltam para o Natal?"* |
+| **Notícias** (Google News, por tema) | *"quais as notícias de hoje?"* · *"notícias sobre tecnologia"* |
+| **Cotações** (dólar, euro, bitcoin, via AwesomeAPI) | *"quanto está o dólar?"* |
+| **Wikipédia** | *"Jarvis, quem foi Santos Dumont?"* |
+
+O briefing do dia pode incluir os lembretes de hoje, as datas especiais próximas, as cotações e 3 manchetes (configure na aba Sistema).

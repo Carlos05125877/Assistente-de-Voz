@@ -2022,6 +2022,11 @@ DEFAULT_SETTINGS = {
     "briefing_plan": True,
     "briefing_plan_full": True,         # le o devocional completo no briefing
     "briefing_verse": True,
+    "briefing_reminders": True,         # lembretes de hoje
+    "briefing_dates": True,             # aniversarios / datas especiais proximas
+    "briefing_quotes": False,           # dolar, euro, bitcoin
+    "briefing_news": False,             # 3 manchetes
+    "news_topic": "",                   # vazio = principais noticias
 }
 
 WMO_PT = {
@@ -2256,6 +2261,19 @@ def build_briefing() -> Dict[str, Any]:
         if nxt:
             sections["alarmes"] = "Próximos alarmes de hoje: " + "; ".join(
                 f"{int(a.get('h', 0)):02d}:{int(a.get('m', 0)):02d}, {a.get('l', 'alarme')}" for a in nxt[:4]) + "."
+    if st["briefing_reminders"]:
+        todays = [r for r in reminders_sorted(load_data()) if r["date"] == now.date().isoformat() and r["time"] > now.strftime("%H:%M")]
+        if todays:
+            sections["lembretes"] = "Lembretes de hoje: " + "; ".join(f"{spoken_time(r['time'])}, {r['text']}" for r in todays[:5]) + "."
+    if st["briefing_dates"]:
+        soon = [e for e in special_dates_view() if e["days_left"] <= 7]
+        if soon:
+            sections["datas"] = special_date_countdown(soon[0]["name"])["spoken"] if len(soon) == 1 else \
+                "; ".join(("Hoje é " if e["days_left"] == 0 else f"Em {e['days_left']} dias, ") + e["name"] for e in soon[:3]) + "."
+    if st["briefing_quotes"]:
+        sections["cotacoes"] = quotes_spoken()
+    if st["briefing_news"]:
+        sections["noticias"] = news_spoken(st.get("news_topic", ""), 3)
     if st["briefing_plan"]:
         if st["briefing_plan_full"]:
             res = handle_youversion_query({"action": "read_plan_day"})
@@ -2268,7 +2286,7 @@ def build_briefing() -> Dict[str, Any]:
     if st["briefing_verse"] and "biblia" not in sections:
         v = fetch_youversion_votd_pt()
         sections["versiculo"] = f"Versículo do dia, {v['reference']}: {v['text']}"
-    parts += [sections[k] for k in ("clima", "alarmes", "biblia", "versiculo") if k in sections]
+    parts += [sections[k] for k in ("clima", "alarmes", "lembretes", "datas", "cotacoes", "noticias", "biblia", "versiculo") if k in sections]
     parts.append("Tenha um ótimo dia." if now.hour < 18 else "Tenha uma boa noite.")
     spoken = " ".join(parts)
     log_event("briefing", f"Briefing gerado ({len(spoken)} caracteres)")
@@ -2337,6 +2355,677 @@ def tts_preview_mp3(text: str, voice: str, rate: str) -> bytes:
                 buf.extend(ch["data"])
         return bytes(buf)
     return asyncio.run(_go())
+
+
+# ============================================================================
+# ASSISTENTE PESSOAL: LEMBRETES AGENDADOS, LISTAS, ROTINAS, DATAS ESPECIAIS,
+# NOTICIAS, COTACOES E WIKIPEDIA
+# ============================================================================
+# Tudo fica no PC (jarvis_data.json). O ESP32 chama GET /api/assistant?client=esp32&action=...
+# pela ferramenta `assistant_tools` do Gemini; o painel usa /api/assistant/data e /api/assistant/op.
+# Um agendador em thread dispara lembretes e rotinas no horario, enviando a fala ao ESP32
+# (direto ou pela fila do heartbeat, se ele estiver ocupado/offline naquele momento).
+# ============================================================================
+from contextlib import contextmanager
+from datetime import date as _date, timedelta
+import xml.etree.ElementTree as ET
+
+WEEKDAY_WORDS = {"segunda": 0, "terca": 1, "quarta": 2, "quinta": 3, "sexta": 4, "sabado": 5, "domingo": 6}
+REPEAT_LABEL = {"none": "uma vez", "daily": "todo dia", "weekdays": "de segunda a sexta", "weekly": "toda semana"}
+
+
+@contextmanager
+def data_txn():
+    """Le-modifica-grava o jarvis_data.json sem perder escritas de outras threads."""
+    with _DATA_LOCK:
+        d = load_data()
+        yield d
+        save_data(d)
+
+
+def _new_id() -> str:
+    return uuid.uuid4().hex[:8]
+
+
+def resolve_date(text: str, base: Optional[_date] = None) -> Optional[_date]:
+    """'hoje', 'amanha', 'depois de amanha', 'sexta', '2026-12-25', '25/12', '25/12/2026', 'dia 15'."""
+    base = base or _date.today()
+    s = normalize_accents_lower(text or "")
+    if not s or s == "hoje":
+        return base
+    if "depois de amanha" in s:
+        return base + timedelta(days=2)
+    if "amanha" in s:
+        return base + timedelta(days=1)
+    m = re.search(r"(\d{4})-(\d{1,2})-(\d{1,2})", s)
+    if m:
+        try:
+            return _date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+        except ValueError:
+            return None
+    m = re.search(r"\b(\d{1,2})/(\d{1,2})(?:/(\d{2,4}))?\b", s)
+    if m:
+        y = int(m.group(3)) if m.group(3) else base.year
+        y = y + 2000 if y < 100 else y
+        try:
+            d = _date(y, int(m.group(2)), int(m.group(1)))
+        except ValueError:
+            return None
+        if not m.group(3) and d < base:
+            d = d.replace(year=d.year + 1)
+        return d
+    for w, wd in WEEKDAY_WORDS.items():
+        if w in s:
+            return base + timedelta(days=((wd - base.weekday()) % 7) or 7)
+    m = re.search(r"\bdia (\d{1,2})\b", s)
+    if m:
+        day = int(m.group(1))
+        y, mo = base.year, base.month
+        if day < base.day:
+            mo += 1
+            if mo > 12:
+                y, mo = y + 1, 1
+        try:
+            return _date(y, mo, day)
+        except ValueError:
+            return None
+    return None
+
+
+def resolve_time(text: str) -> Optional[str]:
+    """'09:30', '9h30', '9h', '21', '7 e meia' -> 'HH:MM'."""
+    s = normalize_accents_lower(text or "")
+    m = re.search(r"(\d{1,2})\s*(?:[:h]\s*(\d{2})?|\s+e\s+meia)?", s)
+    if not m:
+        return None
+    h = int(m.group(1))
+    mi = int(m.group(2)) if m.group(2) else (30 if "meia" in s else 0)
+    if "tarde" in s or "noite" in s:
+        if h < 12:
+            h += 12
+    if not (0 <= h <= 23 and 0 <= mi <= 59):
+        return None
+    return f"{h:02d}:{mi:02d}"
+
+
+def spoken_date(d: _date) -> str:
+    today = _date.today()
+    if d == today:
+        return "hoje"
+    if d == today + timedelta(days=1):
+        return "amanhã"
+    return f"{WEEKDAYS_PT[d.weekday()]}, {d.day} de {MONTHS_PT[d.month - 1]}"
+
+
+def spoken_time(hhmm: str) -> str:
+    h, m = hhmm.split(":")
+    return f"{int(h)} horas" + (f" e {int(m)}" if int(m) else "")
+
+
+# ---------------------------------------------------------------- lembretes
+def _advance_reminder(r: Dict[str, Any], now: datetime) -> None:
+    d = _date.fromisoformat(r["date"])
+    rep = r.get("repeat", "none")
+    if rep == "none":
+        r["active"] = False
+        return
+    while True:
+        d += timedelta(days=7 if rep == "weekly" else 1)
+        if rep == "weekdays" and d.weekday() >= 5:
+            continue
+        if datetime.fromisoformat(f"{d.isoformat()}T{r['time']}") > now:
+            break
+    r["date"] = d.isoformat()
+
+
+def reminder_add(text: str, when_date: str = "", when_time: str = "", repeat: str = "none", minutes: Any = None) -> Dict[str, Any]:
+    text = " ".join((text or "").split())
+    if not text:
+        return {"ok": False, "spoken": "Sobre o que devo te lembrar?"}
+    now = datetime.now()
+    if minutes not in (None, ""):
+        try:
+            dt = now + timedelta(minutes=float(minutes))
+        except ValueError:
+            dt = None
+        if dt is None:
+            return {"ok": False, "spoken": "Não entendi em quantos minutos."}
+        d, t = dt.date(), dt.strftime("%H:%M")
+    else:
+        d = resolve_date(when_date)
+        t = resolve_time(when_time) if when_time else None
+        if d is None:
+            return {"ok": False, "spoken": f"Não entendi a data {when_date}."}
+        if not t:
+            t = "09:00"
+        if datetime.fromisoformat(f"{d.isoformat()}T{t}") <= now:
+            if d == now.date():
+                d += timedelta(days=1)      # "as 7 horas" já passou hoje -> amanha
+            else:
+                return {"ok": False, "spoken": f"A data {spoken_date(d)} já passou."}
+    repeat = repeat if repeat in REPEAT_LABEL else "none"
+    r = {"id": _new_id(), "text": text, "date": d.isoformat(), "time": t, "repeat": repeat, "active": True, "created": now.isoformat(timespec="seconds")}
+    with data_txn() as data:
+        data.setdefault("reminders", []).append(r)
+    rep = "" if repeat == "none" else f", {REPEAT_LABEL[repeat]}"
+    log_event("lembrete", f"Novo lembrete: {text} ({d.isoformat()} {t}{rep})")
+    return {"ok": True, "reminder": r, "spoken": f"Certo. Vou te lembrar de {text} {spoken_date(d)} às {spoken_time(t)}{rep}."}
+
+
+def reminders_sorted(data: Dict[str, Any]) -> List[Dict[str, Any]]:
+    rs = [r for r in data.get("reminders", []) if r.get("active")]
+    return sorted(rs, key=lambda r: (r["date"], r["time"]))
+
+
+def reminders_spoken(day: Optional[_date] = None) -> str:
+    rs = reminders_sorted(load_data())
+    if day:
+        rs = [r for r in rs if r["date"] == day.isoformat()]
+    if not rs:
+        return "Você não tem lembretes" + (" para esse dia." if day else " agendados.")
+    parts = [f"{r['text']}, {spoken_date(_date.fromisoformat(r['date']))} às {spoken_time(r['time'])}" for r in rs[:8]]
+    return f"Você tem {len(rs)} lembrete{'s' if len(rs) > 1 else ''}: " + "; ".join(parts) + "."
+
+
+def reminder_remove(query: str = "", rid: str = "") -> Dict[str, Any]:
+    q = normalize_accents_lower(query)
+    with data_txn() as data:
+        rs = data.get("reminders", [])
+        hit = next((r for r in rs if r.get("active") and (r["id"] == rid or (q and q in normalize_accents_lower(r["text"])))), None)
+        if hit:
+            rs.remove(hit)
+    if not hit:
+        return {"ok": False, "spoken": f"Não encontrei o lembrete {query}."}
+    log_event("lembrete", f"Lembrete removido: {hit['text']}")
+    return {"ok": True, "spoken": f"Lembrete {hit['text']} removido."}
+
+
+# ---------------------------------------------------------------- listas
+def _join_pt(xs: List[str]) -> str:
+    xs = [x for x in xs if x]
+    return xs[0] if len(xs) == 1 else ", ".join(xs[:-1]) + " e " + xs[-1] if xs else ""
+
+
+def _split_items(items: str) -> List[str]:
+    parts = re.split(r",|;|\s+e\s+|\n", items or "")
+    return [" ".join(p.split()) for p in parts if p.strip()]
+
+
+def _list_key(name: str) -> str:
+    n = normalize_accents_lower(name or "compras")
+    n = re.sub(r"^(a |de |da |do )?lista( de| da| do)?\s*", "", n).strip()
+    return n or "compras"
+
+
+def list_add(name: str, items: str) -> Dict[str, Any]:
+    key, new = _list_key(name), _split_items(items)
+    if not new:
+        return {"ok": False, "spoken": "O que devo adicionar na lista?"}
+    with data_txn() as data:
+        lst = data.setdefault("lists", {}).setdefault(key, [])
+        existing = {normalize_accents_lower(i["text"]) for i in lst if not i.get("done")}
+        added = [it for it in new if normalize_accents_lower(it) not in existing]
+        lst.extend({"text": it, "done": False} for it in added)
+    log_event("lista", f"Lista {key}: + {', '.join(added) or '(nada novo)'}")
+    if not added:
+        return {"ok": True, "spoken": f"Isso já está na lista de {key}."}
+    return {"ok": True, "spoken": f"Adicionei {_join_pt(added)} na lista de {key}."}
+
+
+def list_read(name: str) -> Dict[str, Any]:
+    key = _list_key(name)
+    lst = [i["text"] for i in load_data().get("lists", {}).get(key, []) if not i.get("done")]
+    if not lst:
+        return {"ok": True, "spoken": f"A lista de {key} está vazia."}
+    return {"ok": True, "items": lst, "spoken": f"Na lista de {key} tem {len(lst)} ite{'ns' if len(lst) > 1 else 'm'}: {_join_pt(lst)}."}
+
+
+def list_remove(name: str, items: str) -> Dict[str, Any]:
+    key, targets = _list_key(name), [normalize_accents_lower(x) for x in _split_items(items)]
+    removed = []
+    with data_txn() as data:
+        lst = data.setdefault("lists", {}).setdefault(key, [])
+        for it in list(lst):
+            n = normalize_accents_lower(it["text"])
+            if any(t == n or t in n for t in targets):
+                lst.remove(it)
+                removed.append(it["text"])
+    if not removed:
+        return {"ok": False, "spoken": f"Não encontrei {items} na lista de {key}."}
+    return {"ok": True, "spoken": f"Tirei {_join_pt(removed)} da lista de {key}."}
+
+
+def list_clear(name: str) -> Dict[str, Any]:
+    key = _list_key(name)
+    with data_txn() as data:
+        data.setdefault("lists", {})[key] = []
+    return {"ok": True, "spoken": f"Lista de {key} limpa."}
+
+
+# ---------------------------------------------------------------- rotinas
+STEP_ALIASES = {
+    "falar": "speak", "dizer": "speak", "fala": "speak", "comando": "ask", "pedir": "ask", "volume": "volume",
+    "musica": "music", "spotify": "spotify", "briefing": "briefing", "biblia": "bible", "esperar": "wait",
+    "aguardar": "wait", "som": "chime", "lista": "list",
+}
+DEFAULT_ROUTINES = [
+    {"name": "Bom dia", "steps_text": "som\nbriefing", "time": "", "days": [0, 1, 2, 3, 4, 5, 6]},
+    {"name": "Boa noite", "steps_text": "falar: Boa noite, senhor. Vou pausar a música e baixar o volume.\nspotify: pause\nvolume: 30\ncomando: desliga a luz da sala",
+     "time": "", "days": [0, 1, 2, 3, 4, 5, 6]},
+    {"name": "Foco", "steps_text": "falar: Modo foco ativado. Vinte e cinco minutos de concentração.\nmusica: lofi para estudar\ncomando: coloca um timer de 25 minutos chamado foco",
+     "time": "", "days": [0, 1, 2, 3, 4]},
+]
+
+
+def parse_routine_steps(text: str) -> List[Dict[str, str]]:
+    steps = []
+    for line in (text or "").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        m = re.match(r"^([A-Za-zÀ-ÿ]+)\s*:?\s*(.*)$", line)
+        if not m:
+            continue
+        kind = STEP_ALIASES.get(normalize_accents_lower(m.group(1)))
+        if kind:
+            steps.append({"type": kind, "arg": m.group(2).strip()})
+    return steps
+
+
+def _ensure_routines(data: Dict[str, Any]) -> List[Dict[str, Any]]:
+    if "routines" not in data:
+        data["routines"] = [{"id": _new_id(), **r, "last_run": ""} for r in DEFAULT_ROUTINES]
+    return data["routines"]
+
+
+def run_routine_steps(name: str, steps: List[Dict[str, str]]) -> None:
+    """Executa a rotina em segundo plano (ordem preservada, com pausas entre os passos)."""
+    def _go() -> None:
+        log_event("rotina", f"Executando rotina {name} ({len(steps)} passos)")
+        for st in steps:
+            t, a = st["type"], st.get("arg", "")
+            try:
+                if t == "speak" and a:
+                    esp_send({"type": "speak", "text": a})
+                elif t == "ask" and a:
+                    esp_send({"type": "ask", "text": a})
+                elif t == "volume":
+                    esp_send({"type": "volume", "v": max(0, min(100, int(re.sub(r"\D", "", a) or 50)))})
+                elif t == "music" and a:
+                    stype = "playlist" if "playlist" in a.lower() else "track"
+                    handle_spotify_query({"action": "play_query", "q": a.replace("playlist", "").strip(), "type": stype})
+                elif t == "spotify":
+                    handle_spotify_query({"action": (a or "pause").split()[0]})
+                elif t == "briefing":
+                    esp_send({"type": "briefing"})
+                elif t == "bible":
+                    esp_send({"type": "bible", "action": a or "read_plan_day"})
+                elif t == "chime":
+                    esp_send({"type": "test", "mode": a or "chime"})
+                elif t == "list":
+                    esp_send({"type": "speak", "text": list_read(a or "compras")["spoken"]})
+                elif t == "wait":
+                    time.sleep(max(0.0, min(600.0, float(re.sub(r"[^\d.]", "", a) or 1))))
+                    continue
+            except Exception as e:
+                log_event("rotina", f"Passo '{t}' falhou: {e}", "error")
+            time.sleep(0.6)
+    threading.Thread(target=_go, daemon=True).start()
+
+
+def routine_run(query: str = "", rid: str = "") -> Dict[str, Any]:
+    q = normalize_accents_lower(query)
+    with data_txn() as data:
+        rts = _ensure_routines(data)
+        hit = next((r for r in rts if r["id"] == rid), None)
+        if not hit and q:
+            hit = next((r for r in rts if normalize_accents_lower(r["name"]) in q or q in normalize_accents_lower(r["name"])), None)
+        if hit:
+            hit["last_run"] = datetime.now().isoformat(timespec="minutes")
+    if not hit:
+        names = ", ".join(r["name"] for r in load_data().get("routines", []))
+        return {"ok": False, "spoken": f"Não encontrei a rotina {query}. Rotinas disponíveis: {names}."}
+    run_routine_steps(hit["name"], parse_routine_steps(hit["steps_text"]))
+    return {"ok": True, "spoken": f"Rotina {hit['name']} iniciada."}
+
+
+# ---------------------------------------------------------------- datas especiais
+def _next_occurrence(spec: str, today: _date) -> Tuple[Optional[_date], Optional[int]]:
+    """'MM-DD' ou 'YYYY-MM-DD' (anual). Retorna (proxima data, anos completados nela)."""
+    m = re.fullmatch(r"(?:(\d{4})-)?(\d{1,2})-(\d{1,2})", spec or "")
+    if not m:
+        return None, None
+    year0 = int(m.group(1)) if m.group(1) else None
+    mo, dd = int(m.group(2)), int(m.group(3))
+    for y in (today.year, today.year + 1):
+        try:
+            d = _date(y, mo, dd)
+        except ValueError:
+            d = _date(y, mo, 28)
+        if d >= today:
+            return d, (y - year0 if year0 else None)
+    return None, None
+
+
+def special_dates_view() -> List[Dict[str, Any]]:
+    today = _date.today()
+    out = []
+    for e in load_data().get("special_dates", []):
+        if e.get("yearly", True):
+            d, years = _next_occurrence(e["date"], today)
+        else:
+            try:
+                d, years = _date.fromisoformat(e["date"]), None
+            except ValueError:
+                d, years = None, None
+        if d is None or d < today:
+            continue
+        out.append({**e, "next": d.isoformat(), "days_left": (d - today).days, "years": years})
+    return sorted(out, key=lambda x: x["days_left"])
+
+
+def special_date_add(name: str, when: str, yearly: bool = True) -> Dict[str, Any]:
+    d = resolve_date(when)
+    if not name or not d:
+        return {"ok": False, "spoken": "Preciso do nome e da data do evento."}
+    m = re.search(r"(\d{4})", when or "")
+    spec = (f"{m.group(1)}-{d.month:02d}-{d.day:02d}" if (yearly and m) else f"{d.month:02d}-{d.day:02d}") if yearly else d.isoformat()
+    with data_txn() as data:
+        data.setdefault("special_dates", []).append({"id": _new_id(), "name": name.strip(), "date": spec, "yearly": bool(yearly)})
+    return {"ok": True, "spoken": f"Guardei {name}: {d.day} de {MONTHS_PT[d.month - 1]}{', todo ano' if yearly else ''}."}
+
+
+def special_date_countdown(query: str = "") -> Dict[str, Any]:
+    q = normalize_accents_lower(query)
+    items = special_dates_view()
+    if q:
+        items = [e for e in items if q in normalize_accents_lower(e["name"]) or normalize_accents_lower(e["name"]) in q]
+    if not items:
+        return {"ok": False, "spoken": "Não encontrei essa data. Cadastre no painel ou diga, por exemplo: guarda o aniversário da Maria em 10 de março."}
+    phrases = []
+    for e in items[:4]:
+        extra = f", completando {e['years']} anos" if e.get("years") else ""
+        if e["days_left"] == 0:
+            phrases.append(f"hoje é {e['name']}{extra}")
+        elif e["days_left"] == 1:
+            phrases.append(f"amanhã é {e['name']}{extra}")
+        else:
+            phrases.append(f"faltam {e['days_left']} dias para {e['name']}{extra}")
+    s = "; ".join(phrases)
+    return {"ok": True, "spoken": s[:1].upper() + s[1:] + "."}
+
+
+# ---------------------------------------------------------------- noticias / cotacoes / wikipedia
+_NEWS_CACHE: Dict[str, Any] = {}
+
+
+def get_news(topic: str = "", limit: int = 6) -> Dict[str, Any]:
+    key = normalize_accents_lower(topic)
+    hit = _NEWS_CACHE.get(key)
+    if hit and time.time() - hit["ts"] < 600:
+        return hit["data"]
+    base = "https://news.google.com/rss"
+    url = (f"{base}/search?q={urllib.parse.quote(topic)}&hl=pt-BR&gl=BR&ceid=BR:pt-419" if topic
+           else f"{base}?hl=pt-BR&gl=BR&ceid=BR:pt-419")
+    code, body = http_request(url, timeout=10)
+    items = []
+    if code == 200 and body:
+        try:
+            root = ET.fromstring(body.encode("utf-8"))
+            for it in root.iter("item"):
+                title = (it.findtext("title") or "").strip()
+                src = (it.findtext("source") or "").strip()
+                if src and title.endswith(" - " + src):
+                    title = title[: -len(src) - 3]
+                items.append({"title": html.unescape(title), "source": src, "link": it.findtext("link") or "",
+                              "date": it.findtext("pubDate") or ""})
+                if len(items) >= limit:
+                    break
+        except ET.ParseError:
+            pass
+    data = {"ok": bool(items), "topic": topic, "items": items, "error": "" if items else f"Google News HTTP {code}"}
+    if items:
+        _NEWS_CACHE[key] = {"ts": time.time(), "data": data}
+    return data
+
+
+def news_spoken(topic: str = "", n: int = 5) -> str:
+    nw = get_news(topic)
+    if not nw["ok"]:
+        return "Não consegui buscar as notícias agora."
+    head = f"Notícias sobre {topic}" if topic else "Principais notícias"
+    return head + ": " + " ".join(f"{i + 1}. {x['title']}{', do ' + x['source'] if x['source'] else ''}." for i, x in enumerate(nw["items"][:n]))
+
+
+_QUOTES_CACHE: Dict[str, Any] = {"ts": 0, "data": None}
+
+
+def get_quotes() -> Dict[str, Any]:
+    if _QUOTES_CACHE["data"] and time.time() - _QUOTES_CACHE["ts"] < 300:
+        return _QUOTES_CACHE["data"]
+    code, body = http_request("https://economia.awesomeapi.com.br/json/last/USD-BRL,EUR-BRL,BTC-BRL", timeout=8)
+    try:
+        j = json.loads(body) if code == 200 else {}
+    except Exception:
+        j = {}
+    out = []
+    for k, label in (("USDBRL", "Dólar"), ("EURBRL", "Euro"), ("BTCBRL", "Bitcoin")):
+        q = j.get(k) if isinstance(j, dict) else None
+        if isinstance(q, dict) and q.get("bid"):
+            out.append({"code": k[:3], "name": label, "bid": float(q["bid"]), "pct": float(q.get("pctChange") or 0)})
+    data = {"ok": bool(out), "quotes": out, "error": "" if out else f"AwesomeAPI HTTP {code}"}
+    if out:
+        _QUOTES_CACHE.update({"ts": time.time(), "data": data})
+    return data
+
+
+def brl_spoken(v: float) -> str:
+    if v >= 10000:
+        return f"{round(v / 1000):,} mil reais".replace(",", ".")
+    reais, cent = int(v), int(round((v - int(v)) * 100))
+    if cent == 100:
+        reais, cent = reais + 1, 0
+    return f"{reais} rea{'is' if reais != 1 else 'l'}" + (f" e {cent} centavos" if cent else "")
+
+
+def quotes_spoken() -> str:
+    q = get_quotes()
+    if not q["ok"]:
+        return "Não consegui consultar as cotações agora."
+    parts = []
+    for x in q["quotes"]:
+        trend = "alta" if x["pct"] > 0 else ("queda" if x["pct"] < 0 else "estável")
+        pct = f"{abs(x['pct']):.1f}".replace(".", ",")
+        parts.append(f"{x['name']} a {brl_spoken(x['bid'])}" + (f", {trend} de {pct} por cento" if trend != "estável" else ""))
+    return "Cotações agora: " + "; ".join(parts) + "."
+
+
+def wiki_summary(query: str) -> Dict[str, Any]:
+    q = (query or "").strip()
+    if not q:
+        return {"ok": False, "spoken": "Sobre o que voce quer saber?"}
+    title = q
+    code, body = http_request("https://pt.wikipedia.org/w/api.php?" + urllib.parse.urlencode(
+        {"action": "opensearch", "search": q, "limit": 1, "namespace": 0, "format": "json"}), timeout=8)
+    try:
+        j = json.loads(body) if code == 200 else None
+        if j and len(j) > 1 and j[1]:
+            title = j[1][0]
+    except Exception:
+        pass
+    code, body = http_request("https://pt.wikipedia.org/api/rest_v1/page/summary/" + urllib.parse.quote(title.replace(" ", "_")), timeout=8)
+    try:
+        s = json.loads(body) if code == 200 else {}
+    except Exception:
+        s = {}
+    extract = " ".join(str(s.get("extract") or "").split())
+    if not extract:
+        return {"ok": False, "spoken": f"Não encontrei {q} na Wikipédia."}
+    sentences = re.split(r"(?<=[.!?])\s+", extract)
+    short = " ".join(sentences[:3])
+    return {"ok": True, "title": s.get("title", title), "extract": extract,
+            "url": ((s.get("content_urls") or {}).get("desktop") or {}).get("page", ""),
+            "spoken": f"Segundo a Wikipédia, {short}"}
+
+
+# ---------------------------------------------------------------- dispatcher (voz / ESP32)
+def handle_assistant(params: Dict[str, str]) -> Dict[str, Any]:
+    a = (params.get("action") or "").strip()
+    q = params.get("query", "")
+    lst = params.get("list_name", "") or "compras"
+    items = params.get("items", "") or q
+    if a == "news":
+        res = {"ok": True, "spoken": news_spoken(q)}
+    elif a == "quotes":
+        res = {"ok": True, "spoken": quotes_spoken()}
+    elif a == "wiki":
+        res = wiki_summary(q)
+    elif a == "reminder_add":
+        res = reminder_add(q, params.get("date", ""), params.get("time", ""), params.get("repeat", "none"), params.get("minutes"))
+    elif a == "reminder_list":
+        d = resolve_date(params.get("date", "")) if params.get("date") else None
+        res = {"ok": True, "spoken": reminders_spoken(d)}
+    elif a == "reminder_remove":
+        res = reminder_remove(q)
+    elif a == "list_add":
+        res = list_add(lst, items)
+    elif a == "list_read":
+        res = list_read(lst)
+    elif a == "list_remove":
+        res = list_remove(lst, items)
+    elif a == "list_clear":
+        res = list_clear(lst)
+    elif a == "routine_run":
+        res = routine_run(q)
+    elif a == "routine_list":
+        names = [r["name"] for r in _ensure_routines(load_data())]
+        res = {"ok": True, "spoken": "Suas rotinas: " + ", ".join(names) + "."}
+    elif a == "date_add":
+        res = special_date_add(q, params.get("date", ""), params.get("repeat", "yearly") != "none")
+    elif a == "date_countdown":
+        res = special_date_countdown(q)
+    else:
+        res = {"ok": False, "spoken": f"Ação {a} desconhecida no assistente."}
+    res.setdefault("action", a)
+    log_event("assistente", f"{a}: {res.get('spoken', '')[:150]}")
+    return res
+
+
+# ---------------------------------------------------------------- operacoes do painel
+def assistant_data() -> Dict[str, Any]:
+    with data_txn() as data:
+        rts = _ensure_routines(data)
+    return {
+        "reminders": reminders_sorted(data),
+        "lists": {k: v for k, v in (data.get("lists") or {}).items()},
+        "routines": rts,
+        "dates": special_dates_view(),
+        "all_dates": data.get("special_dates", []),
+    }
+
+
+def assistant_op(b: Dict[str, Any]) -> Dict[str, Any]:
+    op = b.get("op", "")
+    if op == "reminder_add":
+        return reminder_add(b.get("text", ""), b.get("date", ""), b.get("time", ""), b.get("repeat", "none"))
+    if op == "reminder_remove":
+        return reminder_remove(rid=str(b.get("id", "")))
+    if op == "list_add":
+        return list_add(b.get("list", "compras"), b.get("items", ""))
+    if op in ("list_toggle", "list_remove_index"):
+        key = _list_key(b.get("list", ""))
+        with data_txn() as data:
+            lst = data.setdefault("lists", {}).setdefault(key, [])
+            i = int(b.get("index", -1))
+            if 0 <= i < len(lst):
+                if op == "list_toggle":
+                    lst[i]["done"] = not lst[i].get("done")
+                else:
+                    lst.pop(i)
+        return {"ok": True}
+    if op == "list_clear_done":
+        key = _list_key(b.get("list", ""))
+        with data_txn() as data:
+            data.setdefault("lists", {})[key] = [i for i in data["lists"].get(key, []) if not i.get("done")]
+        return {"ok": True}
+    if op == "list_delete":
+        with data_txn() as data:
+            data.setdefault("lists", {}).pop(_list_key(b.get("list", "")), None)
+        return {"ok": True}
+    if op == "routine_save":
+        name = str(b.get("name", "")).strip()[:40]
+        if not name:
+            return {"ok": False, "error": "Nome da rotina vazio"}
+        days = [int(d) for d in b.get("days", []) if str(d).isdigit() and 0 <= int(d) <= 6]
+        tm = resolve_time(b.get("time", "")) if b.get("time") else ""
+        with data_txn() as data:
+            rts = _ensure_routines(data)
+            r = next((x for x in rts if x["id"] == b.get("id")), None)
+            if r is None:
+                r = {"id": _new_id(), "last_run": ""}
+                rts.append(r)
+            r.update({"name": name, "steps_text": str(b.get("steps_text", "")), "time": tm or "", "days": days})
+        return {"ok": True, "steps": parse_routine_steps(str(b.get("steps_text", "")))}
+    if op == "routine_delete":
+        with data_txn() as data:
+            data["routines"] = [r for r in _ensure_routines(data) if r["id"] != b.get("id")]
+        return {"ok": True}
+    if op == "routine_run":
+        return routine_run(rid=str(b.get("id", "")))
+    if op == "date_add":
+        return special_date_add(b.get("name", ""), b.get("date", ""), bool(b.get("yearly", True)))
+    if op == "date_remove":
+        with data_txn() as data:
+            data["special_dates"] = [e for e in data.get("special_dates", []) if e["id"] != b.get("id")]
+        return {"ok": True}
+    return {"ok": False, "error": f"operacao desconhecida: {op}"}
+
+
+# ---------------------------------------------------------------- agendador
+def scheduler_tick(now: Optional[datetime] = None) -> List[str]:
+    """Dispara lembretes e rotinas agendadas. Retorna o que foi disparado (para testes/log)."""
+    now = now or datetime.now()
+    fired: List[str] = []
+    to_speak: List[str] = []
+    to_run: List[Tuple[str, List[Dict[str, str]]]] = []
+    with data_txn() as data:
+        for r in data.get("reminders", []):
+            if not r.get("active"):
+                continue
+            due = datetime.fromisoformat(f"{r['date']}T{r['time']}")
+            if now < due:
+                continue
+            late = (now - due).total_seconds()
+            if late < 6 * 3600:
+                to_speak.append(r["text"] if late < 300 else f"{r['text']} (lembrete das {r['time']}, atrasado)")
+                fired.append("lembrete:" + r["text"])
+            _advance_reminder(r, now)
+        data["reminders"] = [r for r in data.get("reminders", []) if r.get("active") or
+                             datetime.fromisoformat(f"{r['date']}T{r['time']}") > now - timedelta(days=7)]
+        hhmm, today = now.strftime("%H:%M"), now.date().isoformat()
+        for rt in data.get("routines", []):
+            if rt.get("time") == hhmm and now.weekday() in rt.get("days", []) and not str(rt.get("last_run", "")).startswith(today + "T" + hhmm):
+                rt["last_run"] = now.isoformat(timespec="minutes")
+                to_run.append((rt["name"], parse_routine_steps(rt.get("steps_text", ""))))
+                fired.append("rotina:" + rt["name"])
+    for text in to_speak:
+        log_event("lembrete", f"Disparando: {text}")
+        esp_send({"type": "test", "mode": "chime"})
+        esp_send({"type": "speak", "text": f"Lembrete, senhor: {text}."})
+    for name, steps in to_run:
+        run_routine_steps(name, steps)
+    return fired
+
+
+def start_scheduler() -> None:
+    def _loop() -> None:
+        while True:
+            try:
+                scheduler_tick()
+            except Exception as e:
+                log_event("agendador", f"erro: {e}", "error")
+            time.sleep(20 - (time.time() % 20))
+    threading.Thread(target=_loop, daemon=True, name="jarvis-scheduler").start()
 
 
 # ============================================================================
@@ -2489,6 +3178,18 @@ class JarvisBridgeHandler(BaseHTTPRequestHandler):
             self._send_html(render_dashboard_html())
         elif path == "/api/state":
             self._send_json(build_state())
+        elif path == "/api/assistant":
+            res = handle_assistant(params)
+            tts_store_put("last", res.get("spoken", ""))
+            self._send_json(compact_for_esp32(res) if params.get("client") == "esp32" else res)
+        elif path == "/api/assistant/data":
+            self._send_json(assistant_data())
+        elif path == "/api/news":
+            self._send_json(get_news(params.get("topic", "")))
+        elif path == "/api/quotes":
+            self._send_json(get_quotes())
+        elif path == "/api/wiki":
+            self._send_json(wiki_summary(params.get("q", "")))
         elif path == "/api/events":
             self._send_json({"events": get_events(int(params.get("after", "0") or 0))})
         elif path == "/api/weather":
@@ -2613,7 +3314,7 @@ class JarvisBridgeHandler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", "0") or "0")
         raw_body = self.rfile.read(length).decode("utf-8", errors="replace") if length > 0 else ""
 
-        if parsed.path in ("/api/device/heartbeat", "/api/esp/send", "/api/settings"):
+        if parsed.path in ("/api/device/heartbeat", "/api/esp/send", "/api/settings", "/api/assistant/op"):
             try:
                 body = json.loads(raw_body or "{}")
                 if not isinstance(body, dict):
@@ -2625,6 +3326,8 @@ class JarvisBridgeHandler(BaseHTTPRequestHandler):
                 self._send_json(handle_heartbeat(body, self.client_address[0]))
             elif parsed.path == "/api/esp/send":
                 self._send_json(esp_send(body))
+            elif parsed.path == "/api/assistant/op":
+                self._send_json(assistant_op(body))
             else:
                 self._send_json({"ok": True, "settings": update_settings(body)})
             return
@@ -2697,5 +3400,6 @@ if __name__ == "__main__":
     print("👉 Conectado a https://www.bible.com/pt/reading-plans")
     print(f"👉 Painel classico: http://127.0.0.1:{port}/classic")
     log_event("servidor", f"Bridge Server iniciado na porta {port}")
+    start_scheduler()
     print("=================================================================")
     server.serve_forever()

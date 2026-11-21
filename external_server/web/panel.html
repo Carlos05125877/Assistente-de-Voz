@@ -88,6 +88,7 @@
     <button data-tab="voice"><span class="ico">🎙</span>Comandos & voz</button>
     <button data-tab="bible"><span class="ico">📖</span>Bíblia</button>
     <button data-tab="spotify"><span class="ico">♫</span>Spotify</button>
+    <button data-tab="assist"><span class="ico">✦</span>Assistente</button>
     <button data-tab="alarms"><span class="ico">⏰</span>Alarmes & notas</button>
     <button data-tab="system"><span class="ico">⚙</span>Sistema</button>
   </nav>
@@ -149,6 +150,21 @@
         <div class="card">
           <h3>Próximos alarmes <span class="r"><button class="btn sm" onclick="go('alarms')">Gerenciar</button></span></h3>
           <ul class="list" id="hAlarms"></ul>
+        </div>
+
+        <div class="card">
+          <h3>Cotações <span class="r"><button class="btn sm" id="qSpeak">🔊 Ler no Jarvis</button></span></h3>
+          <ul class="list" id="hQuotes"><li class="muted">Carregando...</li></ul>
+        </div>
+
+        <div class="card">
+          <h3>Notícias <span class="r"><button class="btn sm" onclick="assistSpeak('news')">🔊 Ler no Jarvis</button></span></h3>
+          <ul class="list small" id="hNews"><li class="muted">Carregando...</li></ul>
+        </div>
+
+        <div class="card">
+          <h3>Hoje no assistente <span class="r"><button class="btn sm" onclick="go('assist')">Abrir</button></span></h3>
+          <ul class="list" id="hToday"></ul>
         </div>
 
         <div class="card">
@@ -303,6 +319,81 @@
       </div>
     </section>
 
+    <!-- ================= ASSISTENTE ================= -->
+    <section id="assist">
+      <div class="grid two">
+        <div class="card">
+          <h3>Lembretes agendados <span class="r small muted">o PC dispara no horário, mesmo com o ESP32 ocupado</span></h3>
+          <ul class="list" id="rList"></ul>
+          <div class="row">
+            <input class="grow" id="rmText" placeholder="Lembrar de... (ex: pagar a conta de luz)">
+          </div>
+          <div class="row">
+            <input type="date" id="rmDate"><input type="time" id="rmTime" value="09:00">
+            <select id="rmRepeat"><option value="none">Uma vez</option><option value="daily">Todo dia</option><option value="weekdays">Seg a sex</option><option value="weekly">Toda semana</option></select>
+            <button class="btn pri" onclick="addReminder()">Agendar</button>
+          </div>
+          <div class="hint">Por voz: "Jarvis, me lembra amanhã às 9 de pagar a conta" · "daqui a 20 minutos tirar o bolo do forno".</div>
+        </div>
+
+        <div class="card">
+          <h3>Listas <span class="r"><select id="lSel" onchange="renderLists()"></select></span></h3>
+          <ul class="list" id="lItems"></ul>
+          <div class="row">
+            <input class="grow" id="lAdd" placeholder="Itens separados por vírgula (ex: leite, pão e café)" onkeydown="if(event.key==='Enter')addListItems()">
+            <button class="btn pri" onclick="addListItems()">Adicionar</button>
+          </div>
+          <div class="row">
+            <input class="grow" id="lNew" placeholder="Nova lista (ex: tarefas, farmácia, ideias)">
+            <button class="btn" onclick="newList()">Criar</button>
+            <button class="btn sm" onclick="op({op:'list_clear_done',list:curList()})">Limpar marcados</button>
+            <button class="btn sm" onclick="assistSpeak('list_read',{list_name:curList()})">🔊 Ler</button>
+            <button class="btn sm danger" onclick="if(confirm('Apagar a lista '+curList()+'?'))op({op:'list_delete',list:curList()})">Apagar lista</button>
+          </div>
+        </div>
+
+        <div class="card">
+          <h3>Rotinas</h3>
+          <ul class="list" id="rtList"></ul>
+          <details id="rtEditor" style="margin-top:10px"><summary id="rtEdTitle">Nova rotina</summary>
+            <input type="hidden" id="rtId">
+            <div class="row"><input class="grow" id="rtName" placeholder="Nome (ex: Chegando em casa)"><input type="time" id="rtTime" title="Horário automático (opcional)"></div>
+            <div class="row small" id="rtDays"></div>
+            <textarea id="rtSteps" style="margin-top:8px;font-family:var(--mono);font-size:12px" placeholder="Um passo por linha:
+falar: Bem-vindo de volta, senhor.
+comando: liga a luz da sala
+musica: playlist jazz
+volume: 50
+esperar: 5
+briefing
+biblia: read_plan_day
+lista: compras
+som"></textarea>
+            <div class="row"><button class="btn pri" onclick="saveRoutine()">Salvar rotina</button><button class="btn" onclick="editRoutine(null)">Limpar</button></div>
+            <div class="hint">Passos: <b>falar</b>, <b>comando</b> (qualquer pedido ao Jarvis, ex: luzes), <b>musica</b>, <b>spotify</b> (pause/next), <b>volume</b>, <b>esperar</b> (segundos), <b>briefing</b>, <b>biblia</b>, <b>lista</b>, <b>som</b>. Por voz: "Jarvis, ativa a rotina boa noite".</div>
+          </details>
+        </div>
+
+        <div class="card">
+          <h3>Datas especiais</h3>
+          <ul class="list" id="dList"></ul>
+          <div class="row">
+            <input class="grow" id="dName" placeholder="Ex: Aniversário da mãe">
+            <input type="date" id="dDate">
+            <label class="toggle small"><input type="checkbox" id="dYearly" checked>Todo ano</label>
+            <button class="btn pri" onclick="addDate()">Guardar</button>
+          </div>
+          <div class="hint">Com o ano de nascimento, o Jarvis diz quantos anos a pessoa completa. Datas próximas entram no briefing.</div>
+        </div>
+
+        <div class="card" style="grid-column:1/-1">
+          <h3>Pesquisa rápida (Wikipédia)</h3>
+          <div class="row"><input class="grow" id="wQ" placeholder="Ex: Machu Picchu, buraco negro, Santos Dumont" onkeydown="if(event.key==='Enter')wiki()"><button class="btn pri" onclick="wiki()">Pesquisar</button><button class="btn" onclick="assistSpeak('wiki',{query:val('wQ')})">🔊 No Jarvis</button></div>
+          <div class="reader" id="wOut" style="margin-top:10px;display:none"></div>
+        </div>
+      </div>
+    </section>
+
     <!-- ================= ALARMES & NOTAS ================= -->
     <section id="alarms">
       <div class="grid two">
@@ -341,7 +432,7 @@
     <section id="system">
       <div class="grid two">
         <div class="card">
-          <h3>Eventos ao vivo <span class="r"><select id="eFilter" onchange="renderEvents()"><option value="">Todos</option><option>esp32</option><option>voz</option><option>painel</option><option>biblia</option><option>tts</option><option>spotify</option><option>briefing</option><option>config</option></select></span></h3>
+          <h3>Eventos ao vivo <span class="r"><select id="eFilter" onchange="renderEvents()"><option value="">Todos</option><option>esp32</option><option>voz</option><option>painel</option><option>biblia</option><option>tts</option><option>spotify</option><option>briefing</option><option>lembrete</option><option>rotina</option><option>assistente</option><option>lista</option><option>config</option></select></span></h3>
           <div class="log" id="eLog"></div>
         </div>
         <div class="card">
@@ -356,6 +447,11 @@
           <label class="toggle"><input type="checkbox" id="cfg_briefing_plan">Plano de leitura</label>
           <label class="toggle"><input type="checkbox" id="cfg_briefing_plan_full">Ler o devocional completo</label>
           <label class="toggle"><input type="checkbox" id="cfg_briefing_verse">Versículo do dia</label>
+          <label class="toggle"><input type="checkbox" id="cfg_briefing_reminders">Lembretes de hoje</label>
+          <label class="toggle"><input type="checkbox" id="cfg_briefing_dates">Aniversários e datas próximas</label>
+          <label class="toggle"><input type="checkbox" id="cfg_briefing_quotes">Cotações (dólar, euro, bitcoin)</label>
+          <label class="toggle"><input type="checkbox" id="cfg_briefing_news">3 manchetes de notícias</label>
+          <div class="row"><span class="small muted" style="width:120px">Tema das notícias</span><input class="grow" id="cfg_news_topic" placeholder="vazio = principais (ex: tecnologia, esportes)"></div>
           <div class="row">
             <button class="btn pri" onclick="saveSettings()">Salvar</button>
             <button class="btn" onclick="testBriefing()">Gerar briefing (texto)</button>
@@ -393,7 +489,7 @@ async function api(path, opts={}){
 const post = (path, body) => api(path, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
 
 // ---------- navegacao
-const TITLES={home:'Visão geral',voice:'Comandos & voz',bible:'Bíblia',spotify:'Spotify',alarms:'Alarmes & notas',system:'Sistema'};
+const TITLES={assist:'Assistente',home:'Visão geral',voice:'Comandos & voz',bible:'Bíblia',spotify:'Spotify',alarms:'Alarmes & notas',system:'Sistema'};
 function go(tab){
   document.querySelectorAll('nav button').forEach(b=>b.classList.toggle('on', b.dataset.tab===tab));
   document.querySelectorAll('section').forEach(s=>s.classList.toggle('on', s.id===tab));
@@ -470,7 +566,7 @@ async function activatePlan(id){ const d=await api('/api/bible/youversion?action
 function readPlanDay(id, day){ $('rPlan').value=id; $('rDay').value=day; loadReader(); $('rText').scrollIntoView({behavior:'smooth'}); }
 
 // ---------- configuracoes
-const CFG=['user_name','city','latitude','longitude','esp_ip','briefing_weather','briefing_alarms','briefing_plan','briefing_plan_full','briefing_verse'];
+const CFG=['user_name','city','latitude','longitude','esp_ip','briefing_weather','briefing_alarms','briefing_plan','briefing_plan_full','briefing_verse','briefing_reminders','briefing_dates','briefing_quotes','briefing_news','news_topic'];
 function fillSettings(st){ CFG.forEach(k=>{ const el=$('cfg_'+k); if(!el || document.activeElement===el) return; if(el.type==='checkbox') el.checked=!!st[k]; else el.value=st[k]??''; }); }
 async function saveSettings(){ const b={}; CFG.forEach(k=>{ const el=$('cfg_'+k); b[k]= el.type==='checkbox'? el.checked : el.value; }); const d=await post('/api/settings',b); if(d){ toast('Configurações salvas'); loadWeather(true);} }
 async function testBriefing(){ $('cBrief').style.display='block'; $('cBrief').textContent='Gerando...'; const d=await api('/api/briefing'); if(d) $('cBrief').textContent=d.spoken; }
@@ -562,10 +658,74 @@ function renderEvents(){
 async function pollEvents(){
   try{ const r=await fetch('/api/events?after='+lastEv); const d=await r.json();
     if(d.events.length){ events=events.concat(d.events).slice(-400); lastEv=d.events[d.events.length-1].id; renderEvents();
+      if(d.events.some(e=>['lembrete','lista','assistente','rotina'].includes(e.kind))) loadAssist();
       if(evInit) d.events.filter(e=>e.kind==='voz'||e.level==='error').forEach(e=>toast(e.msg.slice(0,140), e.level==='error')); }
     evInit = true;
   }catch(e){}
 }
+
+// ---------- assistente
+let A = null;
+const DAYN = ['Seg','Ter','Qua','Qui','Sex','Sáb','Dom'];
+const op = async b => { const d = await post('/api/assistant/op', b); if(d){ if(d.spoken) toast(d.spoken, d.ok===false); else if(d.error) toast(d.error, true); loadAssist(); } return d; };
+async function assistSpeak(action, extra={}){
+  const qs = new URLSearchParams({action, ...extra}).toString();
+  const d = await api('/api/assistant?'+qs); if(!d) return;
+  esp({type:'say_key', key:'last', text:(d.spoken||'').slice(0,280)});
+}
+function curList(){ return $('lSel').value || 'compras'; }
+function fmtDate(iso){ const [y,m,d]=iso.split('-'); const dt=new Date(+y,m-1,+d); const t=new Date(); t.setHours(0,0,0,0); const diff=Math.round((dt-t)/864e5);
+  return diff===0?'Hoje':diff===1?'Amanhã':DAYN[(dt.getDay()+6)%7]+' '+d+'/'+m; }
+const REP={none:'uma vez',daily:'todo dia',weekdays:'seg a sex',weekly:'semanal'};
+function renderAssist(){
+  if(!A) return;
+  $('rList').innerHTML = A.reminders.map(r=>`<li><span class="mono">${fmtDate(r.date)} ${r.time}</span><span class="grow">${esc(r.text)}</span><span class="tag">${REP[r.repeat]||''}</span><button class="btn sm danger" onclick="op({op:'reminder_remove',id:'${r.id}'})">✕</button></li>`).join('') || '<li class="muted">Nenhum lembrete agendado</li>';
+  const names = Object.keys(A.lists); if(!names.includes('compras')) names.unshift('compras');
+  const sel=$('lSel'), cur=sel.value; const opts=names.map(n=>`<option>${esc(n)}</option>`).join('');
+  if(sel.dataset.sig!==opts){ sel.innerHTML=opts; sel.dataset.sig=opts; sel.value = names.includes(cur)?cur:names[0]; }
+  renderLists();
+  $('rtList').innerHTML = A.routines.map(r=>`<li><div class="grow"><b>${esc(r.name)}</b><div class="small muted">${r.time?('⏱ '+r.time+' · '+(r.days.length===7?'todo dia':r.days.map(d=>DAYN[d]).join(' '))):'manual'}${r.last_run?' · última: '+esc(r.last_run.replace('T',' ')):''}</div></div>
+     <button class="btn sm pri" onclick="op({op:'routine_run',id:'${r.id}'})">▶</button><button class="btn sm" onclick="editRoutine('${r.id}')">Editar</button><button class="btn sm danger" onclick="if(confirm('Apagar rotina?'))op({op:'routine_delete',id:'${r.id}'})">✕</button></li>`).join('') || '<li class="muted">Nenhuma rotina</li>';
+  if(!$('rtDays').childElementCount) $('rtDays').innerHTML = DAYN.map((d,i)=>`<label class="toggle"><input type="checkbox" value="${i}" checked>${d}</label>`).join('');
+  $('dList').innerHTML = A.dates.map(e=>`<li><span class="mono" style="min-width:70px">${e.days_left===0?'HOJE':e.days_left+' dias'}</span><span class="grow">${esc(e.name)}${e.years?` <span class="small muted">(${e.years} anos)</span>`:''}<div class="small muted">${e.next.split('-').reverse().join('/')}</div></span><button class="btn sm danger" onclick="op({op:'date_remove',id:'${e.id}'})">✕</button></li>`).join('') || '<li class="muted">Nenhuma data cadastrada</li>';
+  const today = new Date().toISOString().slice(0,10);
+  const hrs = A.reminders.filter(r=>fmtDate(r.date)==='Hoje').map(r=>`<li><span class="mono">${r.time}</span><span class="grow">${esc(r.text)}</span><span class="tag">lembrete</span></li>`);
+  const hds = A.dates.filter(e=>e.days_left<=7).map(e=>`<li><span class="mono">${e.days_left===0?'HOJE':e.days_left+'d'}</span><span class="grow">${esc(e.name)}</span><span class="tag">data</span></li>`);
+  const shop = (A.lists.compras||[]).filter(i=>!i.done).length;
+  $('hToday').innerHTML = hrs.concat(hds).join('') + (shop?`<li><span class="mono">🛒</span><span class="grow">${shop} ite${shop>1?'ns':'m'} na lista de compras</span></li>`:'') || '<li class="muted">Nada agendado para hoje</li>';
+}
+function renderLists(){
+  const key=curList(), items=(A?.lists?.[key])||[];
+  $('lItems').innerHTML = items.map((it,i)=>`<li><input type="checkbox" ${it.done?'checked':''} onchange="op({op:'list_toggle',list:'${esc(key)}',index:${i}})" style="width:17px;height:17px;accent-color:var(--cyan)"><span class="grow" style="${it.done?'text-decoration:line-through;color:var(--mute)':''}">${esc(it.text)}</span><button class="btn sm danger" onclick="op({op:'list_remove_index',list:'${esc(key)}',index:${i}})">✕</button></li>`).join('') || '<li class="muted">Lista vazia</li>';
+}
+async function loadAssist(){ const d=await api('/api/assistant/data'); if(d){ A=d; renderAssist(); } }
+function addReminder(){ const t=val('rmText'); if(!t) return toast('Digite o lembrete', true); op({op:'reminder_add', text:t, date:val('rmDate')||'hoje', time:val('rmTime')||'09:00', repeat:$('rmRepeat').value}); $('rmText').value=''; }
+function addListItems(){ const t=val('lAdd'); if(!t) return; $('lAdd').value=''; op({op:'list_add', list:curList(), items:t}); }
+function newList(){ const n=val('lNew').toLowerCase(); if(!n) return; $('lNew').value=''; A.lists[n]=A.lists[n]||[]; renderAssist(); $('lSel').value=n; renderLists(); toast('Lista '+n+' criada: adicione itens'); }
+function addDate(){ const n=val('dName'), d=val('dDate'); if(!n||!d) return toast('Preencha nome e data', true); op({op:'date_add', name:n, date:d, yearly:$('dYearly').checked}); $('dName').value=''; }
+function editRoutine(id){
+  const r = A.routines.find(x=>x.id===id) || {id:'',name:'',steps_text:'',time:'',days:[0,1,2,3,4,5,6]};
+  $('rtId').value=r.id; $('rtName').value=r.name; $('rtSteps').value=r.steps_text; $('rtTime').value=r.time||'';
+  $('rtDays').querySelectorAll('input').forEach(c=>c.checked=r.days.includes(+c.value));
+  $('rtEdTitle').textContent = id ? 'Editando: '+r.name : 'Nova rotina'; $('rtEditor').open = true;
+}
+async function saveRoutine(){
+  const days=[...$('rtDays').querySelectorAll('input:checked')].map(c=>+c.value);
+  const d = await op({op:'routine_save', id:$('rtId').value, name:val('rtName'), steps_text:$('rtSteps').value, time:val('rtTime'), days});
+  if(d && d.ok){ toast('Rotina salva ('+d.steps.length+' passos reconhecidos)'); editRoutine(null); $('rtEditor').open=false; }
+}
+async function wiki(){
+  const q=val('wQ'); if(!q) return; $('wOut').style.display='block'; $('wOut').textContent='Pesquisando...';
+  const d=await api('/api/wiki?q='+encodeURIComponent(q)); if(!d) return;
+  $('wOut').innerHTML = d.ok ? `<div style="font-weight:700">${esc(d.title)}</div><div>${esc(d.extract)}</div>${d.url?`<div class="hint"><a href="${esc(d.url)}" target="_blank">Abrir na Wikipédia ↗</a></div>`:''}` : `<span class="muted">${esc(d.spoken)}</span>`;
+}
+async function loadInfo(){
+  const q=await api('/api/quotes');
+  if(q) $('hQuotes').innerHTML = q.ok ? q.quotes.map(x=>`<li><span class="grow">${x.name}</span><span class="mono">R$ ${x.bid.toLocaleString('pt-BR',x.bid>1000?{maximumFractionDigits:0}:{minimumFractionDigits:2,maximumFractionDigits:2})}</span><span class="tag" style="color:${x.pct>0?'var(--green)':x.pct<0?'var(--red)':'var(--mute)'}">${x.pct>0?'▲':x.pct<0?'▼':'■'} ${Math.abs(x.pct).toFixed(2)}%</span></li>`).join('') : `<li class="muted">${esc(q.error)}</li>`;
+  const n=await api('/api/news?topic='+encodeURIComponent(S?.settings?.news_topic||''));
+  if(n) $('hNews').innerHTML = n.ok ? n.items.slice(0,5).map(x=>`<li><span class="grow"><a href="${esc(x.link)}" target="_blank" style="color:var(--text);text-decoration:none">${esc(x.title)}</a><div class="small muted">${esc(x.source)}</div></span></li>`).join('') : `<li class="muted">${esc(n.error)}</li>`;
+}
+$('qSpeak').onclick = () => assistSpeak('quotes');
 
 // ---------- inicio
 $('hVol').oninput = e => $('hVolL').textContent = e.target.value+'%';
@@ -574,7 +734,8 @@ const qs = new URLSearchParams(location.search);
 if(qs.get('youversion')){ const m={ok:'Conta YouVersion conectada!',error:'Falha no login do YouVersion (veja o erro na aba Bíblia)',synced:'Planos sincronizados',logout:'Desconectado do YouVersion',session_ok:'Sessão salva',missing:'Preencha usuário e senha'}; toast(m[qs.get('youversion')]||'OK', qs.get('youversion')==='error'); history.replaceState(null,'','/#bible'); }
 if(qs.get('spotify')){ toast('Spotify conectado!'); history.replaceState(null,'','/#spotify'); }
 go((location.hash||'#home').slice(1) in TITLES ? (location.hash||'#home').slice(1) : 'home');
-refresh(); loadWeather(); pollEvents(); setTimeout(spNow, 800);
+refresh(); loadWeather(); pollEvents(); setTimeout(spNow, 800); loadAssist(); setTimeout(loadInfo, 600);
+setInterval(loadAssist, 15000); setInterval(loadInfo, 300000);
 setInterval(refresh, 4000); setInterval(pollEvents, 2500); setInterval(spNow, 15000); setInterval(()=>loadWeather(false), 600000);
 </script>
 </body>

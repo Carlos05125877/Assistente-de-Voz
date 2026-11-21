@@ -9,6 +9,7 @@
 #include "spotify_client.h"
 #include "smartlife_tuya.h"
 #include "bible_client.h"
+#include "bridge_link.h"
 #include "jarvis_features.h"
 
 // ============================================================================
@@ -72,7 +73,7 @@ public:
     outSpokenReply = "";
 
     // Monta o JSON de requisicao para a API Gemini generateContent
-    DynamicJsonDocument reqDoc(7168);
+    DynamicJsonDocument reqDoc(8192);
 
     // 1. System Instruction (Personalidade J.A.R.V.I.S.)
     JsonObject sysInst = reqDoc.createNestedObject("system_instruction");
@@ -89,7 +90,10 @@ public:
       "Sempre que o usuario pedir para tocar musica/controlar Spotify, ler o plano de leitura/devocional de hoje, avancar para o proximo dia do plano, "
       "iniciar ou listar planos do App da Biblia (YouVersion / Holy Bible / bible.com/pt/reading-plans), ler o versiculo do dia ou uma passagem biblica, "
       "guardar/listar/remover alarmes despertadores (hora e minuto), criar timers, anotar lembretes, acionar dispositivos da casa, "
-      "ver o clima ou ajustar o volume dos alto-falantes, chame a ferramenta (function call) apropriada.";
+      "ver o clima ou ajustar o volume dos alto-falantes, chame a ferramenta (function call) apropriada. "
+      "Para lembretes com data/hora, listas (compras, tarefas...), noticias, cotacoes (dolar, euro, bitcoin), "
+      "pesquisas na Wikipedia, rotinas (bom dia, boa noite, foco...) e aniversarios/datas especiais, use assistant_tools; "
+      "converta datas relativas (amanha, sexta) para AAAA-MM-DD usando a data atual.";
     sysParts.createNestedObject()["text"] = sysPrompt;
 
     // 2. Historico de conversa multi-turno
@@ -242,6 +246,51 @@ public:
       reqArr.add("action");
     }
 
+    // Tool 5: assistant_tools (executado no Bridge Server do PC: lembretes agendados, listas, rotinas...)
+    {
+      JsonObject fn = fnDecls.createNestedObject();
+      fn["name"] = "assistant_tools";
+      fn["description"] = "Assistente pessoal no servidor do PC: lembretes agendados com data e hora, listas (compras, tarefas, qualquer nome), noticias, cotacoes de moedas, resumo da Wikipedia, rotinas automaticas e contagem regressiva de aniversarios/datas especiais.";
+      JsonObject params = fn.createNestedObject("parameters");
+      params["type"] = "OBJECT";
+      JsonObject props = params.createNestedObject("properties");
+
+      JsonObject pAct = props.createNestedObject("action");
+      pAct["type"] = "STRING";
+      pAct["description"] = "reminder_add, reminder_list, reminder_remove, list_add, list_read, list_remove, list_clear, news, quotes, wiki, routine_run, routine_list, date_add, date_countdown";
+
+      JsonObject pQ = props.createNestedObject("query");
+      pQ["type"] = "STRING";
+      pQ["description"] = "Texto do lembrete, tema das noticias, termo da Wikipedia, nome da rotina ou nome do evento/aniversario";
+
+      JsonObject pDate = props.createNestedObject("date");
+      pDate["type"] = "STRING";
+      pDate["description"] = "Data AAAA-MM-DD (lembrete, data especial ou filtro de reminder_list)";
+
+      JsonObject pTime = props.createNestedObject("time");
+      pTime["type"] = "STRING";
+      pTime["description"] = "Hora HH:MM do lembrete";
+
+      JsonObject pMin = props.createNestedObject("minutes");
+      pMin["type"] = "INTEGER";
+      pMin["description"] = "Para 'daqui a N minutos' (em vez de date/time)";
+
+      JsonObject pRep = props.createNestedObject("repeat");
+      pRep["type"] = "STRING";
+      pRep["description"] = "none, daily, weekdays ou weekly (lembretes); none para data especial que nao se repete";
+
+      JsonObject pList = props.createNestedObject("list_name");
+      pList["type"] = "STRING";
+      pList["description"] = "Nome da lista (padrao: compras)";
+
+      JsonObject pItems = props.createNestedObject("items");
+      pItems["type"] = "STRING";
+      pItems["description"] = "Itens separados por virgula (list_add / list_remove)";
+
+      JsonArray reqArr = params.createNestedArray("required");
+      reqArr.add("action");
+    }
+
     // 4. Generation Config
     JsonObject gen = reqDoc.createNestedObject("generationConfig");
     gen["temperature"] = 0.4;
@@ -319,6 +368,19 @@ public:
           String theme  = args["theme"] | "";
           int planDay   = args["plan_day"] | 0;
           toolResultSummary = bible.executeCommand(cli, action, ref, theme, planDay);
+          audio.playSuccessBeep();
+          isDirectReadoutTool = true;
+        }
+        else if (calledToolName == "assistant_tools") {
+          String path = "/api/assistant?client=esp32&action=" + BibleClient::urlEncode(args["action"] | "");
+          static const char* const kArgs[] = {"query", "date", "time", "minutes", "repeat", "list_name", "items"};
+          for (const char* k : kArgs) {
+            if (args.containsKey(k)) path += String("&") + k + "=" + BibleClient::urlEncode(args[k].as<String>());
+          }
+          String spoken;
+          toolResultSummary = BridgeLink::fetchSpoken(path, spoken)
+              ? spoken
+              : String("Esse recurso precisa do servidor Jarvis ligado no computador.");
           audio.playSuccessBeep();
           isDirectReadoutTool = true;
         }
