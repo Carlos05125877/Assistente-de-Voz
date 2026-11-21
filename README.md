@@ -1,103 +1,153 @@
-# 🤖 J.A.R.V.I.S. — Sistema Completo para ESP32 (`ESP-WROOM-32` / `ESP32S`) + Servidor Externo Bridge
+# 🤖 J.A.R.V.I.S. — Assistente de voz: ESP32-S3 + Netlify (100% grátis)
 
-Sistema completo de assistente de voz inteligente inspirado no **J.A.R.V.I.S.**, desenvolvido sob medida para o **ESP32 WiFi + Bluetooth (`ESP-WROOM-32`)**, equipado com **2 Alto-Falantes em Estéreo Real (Canal L + Canal R)** e **1 Microfone Digital I2S**, **sem sensor de distância**.
+Diga **“Jarvis”** e fale, sem apertar nada. O ESP32-S3 fica ligado 24 h com a palavra de ativação, o relógio e o áudio.
+Tudo o que é pesado roda no **Netlify**, que só liga quando é chamado (plano free, sem servidor 24 h).
 
----
+```
+          ┌──────────────── ESP32-S3 N16R8 (sempre ligado, offline) ────────────────┐
+ "Jarvis" ─► WakeNet (palavra) ─► AFE: eco + ruído + fim da fala ─► Groq Whisper ─┐ │
+          │ alarmes · lembretes · timers · horários das rotinas (NVS)              │ │
+          │ player MP3: buffer de 256 KB na PSRAM, toca enquanto baixa             │ │
+          └─────────────────────────────────▲──────────────────────────────────────┘ │
+                     MP3 em partes + ações  │        POST /api/turn (texto + estado)  │
+          ┌─────────────── Netlify Functions (sob demanda) ──────────────────────────▼─┐
+          │ Gemini + ferramentas · Edge TTS (voz neural) · YouVersion · Spotify          │
+          │ SmartLife/Tuya · clima · notícias · cotações · Wikipédia · painel · Blobs    │
+          └──────────────────────────────────────────────────────────────────────────────┘
+```
 
-## 🌟 O Que Este Sistema Faz
+| Fica no ESP32-S3 | Vai para o Netlify |
+|---|---|
+| Palavra **“Jarvis”** (ESP-SR WakeNet9, sem internet) | Agente Gemini com function calling |
+| Cancelamento de eco: “Jarvis” interrompe o Jarvis enquanto ele fala | Voz do Jarvis: Edge TTS em MP3 24 kHz |
+| Supressão de ruído e detecção de fim de fala (AFE) | YouVersion (login, planos, devocional, passagens) |
+| Voz → texto direto no Groq (upload enquanto você fala) | Spotify, casa inteligente, clima, notícias, cotações, Wikipédia |
+| Alarmes, lembretes, timers e rotinas com horário (tocam offline) | Painel de controle e dados (Netlify Blobs) |
+| Player MP3 estéreo nos 2 alto-falantes | Sync diário do YouVersion (função agendada) |
 
-1. **🎵 Conexão Completa com o Spotify**:
-   - Busca e toca músicas, artistas, álbuns e playlists por comando de voz (*"Jarvis, toca Coldplay no Spotify"*).
-   - Controles de **Play, Pause, Próxima Música, Música Anterior, Volume (0-100%)** e consulta da faixa atual (*"Que música está tocando?"*).
-   - Funciona tanto **diretamente no ESP32** (via OAuth2 Refresh Token) quanto via **Servidor Externo Jarvis Bridge** (com login no Spotify em 1 clique e streaming de áudio PCM direto para os 2 alto-falantes do ESP32).
-2. **📖 Conexão Oficial com o App da Bíblia (`Holy Bible / YouVersion` — `https://www.bible.com/pt/reading-plans`)**:
-   - Conecta diretamente com o ecossistema do **App da Bíblia (YouVersion)**:
-     - **Planos de Leitura & Devocionais Diários** (`https://www.bible.com/pt/reading-plans`): guarda na memória Flash `NVS` do ESP32 (e no Servidor Externo) qual Plano de Leitura você está fazendo e em qual **Dia do Plano** você está (`Dia 1`, `Dia 2`, `Dia 3`...).
-     - Lê por voz nos 2 alto-falantes a **Reflexão Devocional do Dia + a Passagem Bíblica (NVI/ARC/NVT)** e avança automaticamente ou por comando de voz (*"Jarvis, leia o meu devocional de hoje"*, *"Avance para o próximo dia do meu plano da Bíblia"*).
-     - Inicia novos planos por tema (*ansiedade e paz, sabedoria em Provérbios, esperança e fé, gratidão e louvor*) ou por **qualquer URL/ID de plano de `https://www.bible.com/pt/reading-plans`**.
-     - Busca o **Versículo do Dia Oficial** de `https://www.bible.com/pt/verse-of-the-day` e qualquer capítulo/versículo nas traduções **NVI (`129`), ARC (`211`), NVT (`193`) e ARA (`1608`)** de `bible.com/pt/bible`.
-3. **⏰ Guardião de Alarmes Persistentes (`NVS`) e Timers**:
-   - **Guarda até 8 Alarmes Despertadores por horário (`HH:MM`) na memória Flash NVS do ESP32** (não apaga ao desligar da tomada e sincroniza automaticamente com o Servidor Externo!).
-   - Suporta alarmes diários recorrentes ou únicos, além de **5 Timers regressivos simultâneos** e **Lista de Lembretes/Notas persistente**.
-   - Quando o horário do alarme chega, o Jarvis toca o **alarme estéreo espacial** nos 2 alto-falantes e anuncia o rótulo do alarme por voz neural!
-4. **🖥️ Servidor Externo Opcional (`external_server/jarvis_bridge_server.py`)**:
-   - Servidor leve em Python (`FastAPI`) para rodar no PC, Raspberry Pi ou VPS.
-   - Alivia `~85 KB` de RAM e conexões TLS/HTTPS do ESP32, oferece login OAuth2 do Spotify com 1 clique no navegador (`http://localhost:8080`) e faz backup automático dos alarmes e histórico bíblico em `jarvis_data.json`.
-5. **🏠 Casa Inteligente (`SmartLife / Tuya IoT`) + Clima (`Open-Meteo`) + Painel Web HUD (`http://jarvis.local`)**:
-   - Controle de lâmpadas, fitas LED RGB, ar-condicionado e tomadas inteligentes + painel web completo com cards dedicados para **Voz/Gemini**, **Spotify**, **App Bíblia**, **Alarmes NVS**, **Teste Estéreo L/R** e **SmartLife**.
+**Como uma conversa acontece**
+1. Você diz “Jarvis, …”.
+2. O WakeNet reconhece a palavra no próprio chip e a conexão com o Groq já abre.
+3. Sua fala, limpa de eco e ruído, sobe enquanto você fala. Quando você para, o texto chega em menos de 1 s.
+4. O Netlify responde com a 1ª frase em streaming, que começa a tocar em ~1 s.
+5. O resto vem em partes pela mesma conexão. Com 256 KB de buffer na PSRAM, o devocional inteiro sai sem pausas.
 
----
+**Durante e depois da resposta**
+- Se o Jarvis terminar com uma pergunta, ele continua ouvindo sem precisar dizer “Jarvis”.
+- Dizer “Jarvis” no meio da fala interrompe e já escuta o novo pedido.
 
-## 🔌 Esquema de Ligação (Pinout Seguro para `ESP-WROOM-32` — Sem Sensor de Distância)
+## 1. Hardware (ESP32-S3-DevKitC-1 **N16R8**: 16 MB flash, 8 MB PSRAM)
+| Função | Pinos |
+|---|---|
+| Microfone INMP441 | SCK 4 · WS 5 · SD 6 · L/R no GND · VDD 3V3 |
+| 2× MAX98357A estéreo | BCLK 15 · LRC 16 · DIN 7 (os dois no mesmo barramento; mantenha a ligação do pino SD que define L e R) |
+| Botões | BOOT (GPIO 0) e externo (GPIO 21 → GND) |
+| LED de status | RGB da placa (GPIO 48; na DevKitC-1 v1.1 é o 38: troque `PIN_RGB_LED` em `config.h`) |
 
-> **ATENÇÃO**: No `ESP-WROOM-32`, os pinos `GPIO 6 a 11` são usados pela memória Flash interna. Nunca ligue periféricos nesses pinos. Todos os pinos abaixo são 100% seguros.
+Não use os GPIO 19/20 (USB), 26–37 (flash e PSRAM octal) nem 43/44 (serial).
 
-### 1. Microfone Digital I2S (`INMP441` ou `ICS-43434`)
-| Pino do Microfone | Pino do `ESP-WROOM-32` | Observação |
-| :--- | :--- | :--- |
-| **VDD** | `3.3V` | **NUNCA ligue em 5V!** |
-| **GND** | `GND` | Terra comum |
-| **L/R** | `GND` | Define captura no canal Esquerdo |
-| **SCK (BCLK)** | `GPIO 26` | Clock de bits I2S0 |
-| **WS (LRCLK)** | `GPIO 25` | Word Select I2S0 |
-| **SD (DOUT)** | `GPIO 33` | Entrada de dados de áudio |
+Cores do LED:
+- azul fraco: esperando
+- ciano: ouvindo
+- roxo: pensando
+- verde: falando
+- âmbar: mudo
+- vermelho: erro
 
-### 2. Dois Alto-Falantes com 2x Amplificadores I2S `MAX98357A` (ou 1x DAC Estéreo `PCM5102A`)
-| Pino dos 2x `MAX98357A` | Pino do `ESP-WROOM-32` | Configuração Estéreo (Canal L vs Canal R) |
-| :--- | :--- | :--- |
-| **VIN** | `5V` (VIN/VBUS) | Fonte 5V >= 2A recomendada para 2 alto-falantes de 3W/4Ω |
-| **GND** | `GND` | Terra comum |
-| **BCLK** | `GPIO 14` | Ligado em paralelo nos 2 módulos |
-| **LRC (WS)** | `GPIO 15` | Ligado em paralelo nos 2 módulos |
-| **DIN (DOUT)** | `GPIO 27` | Ligado em paralelo nos 2 módulos |
-| **SD (SD_MODE)** | *Seleciona o Canal* | **Módulo Esquerdo (L)**: ligue `SD` direto no `3.3V`<br>**Módulo Direito (R)**: ligue `SD` ao `3.3V` via resistor `100kΩ–470kΩ` (ou aberto p/ mix L+R) |
+**Botão:** um toque fala ou interrompe; segurar 2 s deixa o microfone mudo (privacidade). Também dá para dizer “Jarvis, desliga o microfone”; para religar, use o botão ou o painel.
 
-### 3. Acionamento por Botão, Web ou Serial (Sem Sensor de Distância)
-- **Botão `BOOT` nativo (`GPIO 0`)**: Pressione para falar com o Jarvis.
-- **Botão Externo Opcional (`GPIO 4` e `GND`)**: Caso queira um botão no gabinete do projeto.
-- **Painel Web HUD (`http://jarvis.local`)**: Botão para ativar o microfone remotamente ou enviar comandos e gerenciar alarmes.
+## 2. Deploy no Netlify (plano free)
+1. No Netlify: **Add new site → Import from Git** e escolha este repositório. Não há etapa de build: o painel é a pasta `public/` e as funções estão em `netlify/functions/`.
+2. Em **Site configuration → Environment variables**, crie:
 
----
+   | Variável | Para quê |
+   |---|---|
+   | `PANEL_PASSWORD` | Senha do painel (cookie HttpOnly assinado) |
+   | `DEVICE_TOKEN` | Token longo e aleatório; o mesmo vai no `secrets_local.h` do ESP32 |
+   | `GEMINI_API_KEY` | *(opcional)* Pode ser colocada depois pelo painel |
+   | `GROQ_API_KEY` | *(opcional)* Pode ser colocada pelo painel; ela é enviada ao ESP32 no sync |
 
-## 🖥️ Como Usar o Servidor Externo (`external_server/jarvis_bridge_server.py`)
+3. Faça o deploy e abra `https://SEU-SITE.netlify.app`, entre com a senha e, na aba **Sistema → Chaves de API**, cole as chaves do Gemini e do Groq (as duas têm plano gratuito).
+4. Na aba **Bíblia**, entre com sua conta do YouVersion. Na aba **Spotify**, conecte a conta, usando a Redirect URI mostrada ali.
 
-O ESP32 funciona 100% sozinho, mas se quiser aliviar o microcontrolador e facilitar o login do Spotify:
+> **Créditos do plano free.** O free tem 300 créditos por mês e não cobra excedente: se acabarem, o site pausa até o próximo ciclo. O que gasta crédito é o tempo de execução das funções, as requisições, a banda e **cada deploy de produção (15 créditos)**.
+>
+> Nossa *estimativa* para uso pessoal fica em uns 60 a 120 créditos por mês (sync de 3 em 3 min, painel aberto 1 h por dia, ~30 conversas por dia e o devocional diário), contando 2 deploys. **Evite deploys frequentes**: faça vários commits e publique de uma vez (ou desligue o auto-deploy e publique manualmente). O consumo aparece em *Usage & billing*.
 
-1. Instale as dependências e inicie o servidor no seu computador ou Raspberry Pi:
+## 3. Firmware do ESP32-S3 (ESP-IDF)
+O firmware usa o **ESP-IDF 5.x** com o Arduino como componente. O ESP-IDF é necessário para gravar o modelo da palavra “Jarvis” na partição `model`. Por isso a Arduino IDE não serve mais. As dependências são baixadas sozinhas no primeiro build:
+- arduino-esp32
+- esp-sr
+- ArduinoJson
+- arduino-libhelix
+
+1. Instale o ESP-IDF 5.4 ou mais novo. O jeito mais fácil é a extensão **ESP-IDF** do VS Code.
+2. Configure as credenciais:
    ```bash
-   cd external_server
-   pip install -r requirements.txt
-   python jarvis_bridge_server.py
+   cd firmware
+   cp main/secrets_local.example.h main/secrets_local.h   # WiFi, NETLIFY_URL, DEVICE_TOKEN, OTA_PASSWORD
    ```
-2. Abra `http://localhost:8080` no navegador, cole seu `Spotify Client ID` e `Client Secret` e clique em **Conectar Conta Spotify**.
-3. No arquivo [config_template.h](file:///c:/Users/carlo/.gemini/antigravity/scratch/jarvis_esp32/config_template.h), coloque o IP do seu computador em `EXTERNAL_SERVER_URL`:
-   ```cpp
-   #define EXTERNAL_SERVER_URL "http://192.168.1.100:8080"
+3. Compile e grave pelo USB. O `flash` grava o app **e** o modelo do WakeNet:
+   ```bash
+   idf.py set-target esp32s3
+   idf.py build
+   idf.py -p COM5 flash monitor        # no Linux/Mac: -p /dev/ttyACM0
+   ```
+4. No monitor deve aparecer `Palavra de ativação: wn9_jarvis_tts`. Se aparecer outra palavra, abra `idf.py menuconfig`, vá em *ESP Speech Recognition → Load Multiple Wake Words*, marque **Jarvis**, desmarque as outras e grave de novo.
+5. Para as próximas atualizações, use o WiFi (o modelo não muda):
+   ```bash
+   python tools/espota.py -i jarvis.local -a SUA_SENHA_OTA -f build/jarvis.bin
    ```
 
----
+Ajustes úteis em `firmware/main/config.h`:
+- `MIC_SHIFT_BITS`: ganho do microfone. Diminua se o Whisper não te ouvir; aumente se o áudio sair distorcido.
+- `END_SILENCE_MS`: quanto silêncio encerra a fala.
 
-## 🗣️ Exemplos de Comandos de Voz para o Jarvis
+**Memória:** o modelo do WakeNet e o AFE, o buffer de MP3 (256 KB), a gravação da fala (14 s) e os buffers TLS ficam na PSRAM de 8 MB. A RAM interna sobra para o WiFi e o áudio em tempo real. O painel mostra a RAM e a PSRAM livres.
 
-- **🎵 Spotify & Música**:
-  - *"Jarvis, toca Bohemian Rhapsody no Spotify"*
-  - *"Jarvis, coloca uma playlist de louvor / rock clássico no Spotify"*
-  - *"Jarvis, pausa a música"* / *"Pula para a próxima faixa"* / *"Volume do Spotify em 70%"*
-- **📖 App da Bíblia (`Holy Bible / YouVersion` — `bible.com/pt/reading-plans`)**:
-  - *"Jarvis, leia o meu devocional e plano de leitura de hoje"*
-  - *"Jarvis, avance para o próximo dia do meu plano no App da Bíblia"*
-  - *"Jarvis, comece um plano de leitura sobre ansiedade e paz no App da Bíblia"*
-  - *"Jarvis, inicie o plano de sabedoria em Provérbios"*
-  - *"Jarvis, quais planos de leitura estão disponíveis no App da Bíblia?"*
-  - *"Jarvis, qual é o versículo do dia no YouVersion?"*
-  - *"Jarvis, leia o Salmo 23 na NVI"* / *"O que diz em João 3:16?"*
-- **⏰ Guardar Alarmes (NVS) & Timers**:
-  - *"Jarvis, guarda um alarme para as 7 e 30 da manhã para trabalhar"*
-  - *"Jarvis, coloca um despertador às 22 horas para tomar remédio"*
-  - *"Jarvis, quais são os meus alarmes salvos?"*
-  - *"Jarvis, remova o alarme das 7 e 30"*
-  - *"Jarvis, coloca um timer de 10 minutos"*
-- **🏠 Casa Inteligente & Sistema**:
-  - *"Jarvis, acende a luz da sala"* / *"Coloca a fita LED em azul"*
-  - *"Jarvis, como está o clima agora?"*
-  - *"Jarvis, relatório completo de status do sistema"*
+**Sync:** a cada 3 min o ESP32 manda seu estado e recebe os comandos e configurações do painel. Com o painel aberto, a cada 10 s. Qualquer mudança local sincroniza em ~3 s.
+
+## 4. O que ele faz (exemplos de voz)
+| Área | Exemplos |
+|---|---|
+| Bíblia (sua conta YouVersion) | "leia meu plano de hoje", "avance para o próximo dia", "liste meus planos", "leia Salmos 23" |
+| Briefing | "me dá o briefing", com clima, alarmes, lembretes, aniversários, devocional e versículo (configurável) |
+| Spotify | "toca Coldplay", "pausa", "próxima", "volume do Spotify em 40" |
+| Casa | "liga a luz da sala", "fita LED em azul" |
+| Alarmes/timers | "alarme às 6 e meia", "timer de 10 minutos" (alarmes com *devocional* ou *briefing* no nome leem o briefing ao desligar) |
+| Lembretes | "me lembra amanhã às 9 de pagar a conta", "daqui a 20 minutos tirar o bolo" |
+| Listas | "adiciona leite e café na lista de compras", "o que tem na lista de tarefas?" |
+| Rotinas | "ativa a rotina boa noite", "modo foco" (crie as suas na aba Assistente; com horário, o ESP32 dispara sozinho) |
+| Informação | "notícias de hoje", "quanto está o dólar?", "quem foi Santos Dumont?", "quantos dias faltam pro Natal?" |
+
+Todas as frases começam com “Jarvis, …”. Se ele terminar com uma pergunta, responda direto. **Sem internet:** a palavra “Jarvis” continua sendo reconhecida (o pedido não, ele avisa com um som), e alarmes, lembretes e timers tocam do mesmo jeito. Um alarme para com o botão ou dizendo “Jarvis”.
+
+## 5. Painel de controle
+O painel tem estas abas:
+- **Visão geral**
+- **Comandos & voz**: fazer o Jarvis falar, prévia de voz no navegador, histórico
+- **Bíblia**: login, planos, leitor
+- **Spotify**
+- **Assistente**: lembretes, listas, rotinas, datas, Wikipédia
+- **Alarmes & notas**
+- **Sistema**: eventos; configurações, incluindo a palavra “Jarvis”, a sensibilidade, a interrupção por voz e a continuação de conversa; chaves de API; casa inteligente
+
+O painel só consulta o Netlify a cada 10 s com a aba visível. Diagnóstico do YouVersion em `/youversion/debug`. Uma função agendada sincroniza os planos do YouVersion todo dia às 05:15.
+
+## 6. Estrutura
+```
+firmware/                    projeto ESP-IDF (ESP32-S3)
+  main/main.cpp              laço principal: conversa, botão, eventos, sync
+  main/listener.h            INMP441 + AFE (eco, ruído, VAD) + WakeNet "Jarvis" + gravação na PSRAM
+  main/speaker.h             2x MAX98357A, sons, player MP3 (libhelix) e referência do eco
+  main/net_link.h            HTTP keep-alive para o Netlify + Groq Whisper em streaming
+  main/agenda.h              alarmes, lembretes, timers e rotinas na NVS
+  sdkconfig.defaults         PSRAM octal, TLS na PSRAM, WakeNet9 "Jarvis"
+  partitions.csv             2x app (OTA) + partição "model" do ESP-SR
+netlify/functions            api.mjs (painel + sync), voice.mjs (turno/TTS), youversion-daily.mjs
+netlify/lib                  agente, TTS, YouVersion, Spotify, Tuya, informações, armazenamento
+public/index.html            painel
+tests/                       testes offline das funções (npm test)
+```
+
+> ⚠️ As APIs `*.youversionapi.com` usadas para a conta do YouVersion **não são oficiais**: podem mudar sem aviso e o uso automatizado pode contrariar os termos do serviço. Use só na sua própria conta. O Edge TTS também é um serviço não oficial; se falhar, o Jarvis usa uma voz reserva.

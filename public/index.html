@@ -1,0 +1,798 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>J.A.R.V.I.S. — Painel de Controle</title>
+<style>
+  :root{
+    --bg:#060a12; --panel:#0b1321; --panel2:#0f1a2c; --line:#1a2a42; --text:#e3eefc; --mute:#8aa3c2;
+    --cyan:#34e4ff; --cyan-d:rgba(52,228,255,.14); --green:#3ddc97; --amber:#ffc46b; --red:#ff5d73;
+    --r:12px; --mono:ui-monospace,SFMono-Regular,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--text);font:14px/1.45 system-ui,"Segoe UI",Roboto,sans-serif}
+  body{background:radial-gradient(1200px 600px at 80% -10%,rgba(52,228,255,.07),transparent 60%),var(--bg)}
+  a{color:var(--cyan)}
+  .app{display:grid;grid-template-columns:220px 1fr;min-height:100vh}
+  nav{border-right:1px solid var(--line);padding:18px 12px;position:sticky;top:0;height:100vh;background:rgba(6,10,18,.85)}
+  .brand{font-weight:800;letter-spacing:3px;color:var(--cyan);font-size:15px;padding:4px 10px 18px;text-shadow:0 0 14px rgba(52,228,255,.45)}
+  .brand small{display:block;letter-spacing:1px;color:var(--mute);font-weight:500;font-size:11px;margin-top:2px}
+  nav button{all:unset;display:flex;gap:10px;align-items:center;width:100%;box-sizing:border-box;padding:9px 12px;border-radius:9px;color:var(--mute);cursor:pointer;margin-bottom:2px}
+  nav button:hover{background:var(--panel2);color:var(--text)}
+  nav button.on{background:var(--cyan-d);color:var(--cyan);box-shadow:inset 2px 0 0 var(--cyan)}
+  nav .ico{width:20px;text-align:center}
+  main{padding:18px 24px 40px;min-width:0}
+  .top{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:18px}
+  .top h1{font-size:18px;margin:0 auto 0 0;font-weight:700}
+  .chip{display:inline-flex;align-items:center;gap:7px;border:1px solid var(--line);background:var(--panel);padding:5px 11px;border-radius:99px;font-size:12px;color:var(--mute)}
+  .dot{width:8px;height:8px;border-radius:50%;background:var(--mute)}
+  .dot.ok{background:var(--green);box-shadow:0 0 8px var(--green)} .dot.warn{background:var(--amber)} .dot.bad{background:var(--red)}
+  section{display:none} section.on{display:block}
+  .grid{display:grid;gap:16px;grid-template-columns:repeat(auto-fill,minmax(310px,1fr))}
+  .grid.two{grid-template-columns:repeat(auto-fit,minmax(380px,1fr))}
+  .card{background:linear-gradient(180deg,var(--panel2),var(--panel));border:1px solid var(--line);border-radius:var(--r);padding:16px;min-width:0}
+  .card h3{margin:0 0 12px;font-size:12px;letter-spacing:1.4px;text-transform:uppercase;color:var(--mute);display:flex;align-items:center;gap:8px}
+  .card h3 .r{margin-left:auto;text-transform:none;letter-spacing:0}
+  .big{font-size:34px;font-weight:700;line-height:1.1}
+  .muted{color:var(--mute)} .small{font-size:12px} .mono{font-family:var(--mono)}
+  .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:10px}
+  .row>.grow{flex:1;min-width:160px}
+  input,select,textarea{background:#070d18;border:1px solid #223652;color:var(--text);padding:8px 10px;border-radius:8px;font:inherit;outline:none}
+  input:focus,select:focus,textarea:focus{border-color:var(--cyan)}
+  textarea{width:100%;min-height:90px;resize:vertical}
+  .btn{display:inline-block;text-decoration:none;border:1px solid #29496f;background:#0f2036;color:var(--text);padding:8px 13px;border-radius:8px;cursor:pointer;font:inherit;font-weight:600;white-space:nowrap}
+  .btn:hover{border-color:var(--cyan);color:var(--cyan)}
+  .btn.pri{background:var(--cyan);border-color:var(--cyan);color:#03121c}
+  .btn.pri:hover{filter:brightness(1.1);color:#03121c}
+  .btn.danger{border-color:#5a2230;color:#ffb3bf} .btn.danger:hover{border-color:var(--red);color:var(--red)}
+  .btn.sm{padding:5px 9px;font-size:12px}
+  .btn:disabled{opacity:.5;cursor:wait}
+  .kv{display:grid;grid-template-columns:auto 1fr;gap:4px 12px;font-size:13px}
+  .kv span:nth-child(odd){color:var(--mute)}
+  .bar{height:7px;background:#13233a;border-radius:99px;overflow:hidden;margin-top:6px}
+  .bar>i{display:block;height:100%;background:linear-gradient(90deg,#1aa6c4,var(--cyan));border-radius:99px;transition:width .4s}
+  .list{list-style:none;margin:0;padding:0}
+  .list li{display:flex;gap:10px;align-items:center;padding:9px 0;border-bottom:1px solid var(--line)}
+  .list li:last-child{border-bottom:0}
+  .list .grow{flex:1;min-width:0}
+  .tag{font-size:11px;padding:2px 7px;border-radius:99px;border:1px solid var(--line);color:var(--mute)}
+  .tag.on{border-color:var(--cyan);color:var(--cyan)}
+  .log{background:#04080f;border:1px solid var(--line);border-radius:9px;padding:10px;font-family:var(--mono);font-size:12px;max-height:420px;overflow:auto;white-space:pre-wrap}
+  .log .e{padding:2px 0;border-bottom:1px dashed #0f1c2e}
+  .log .warn{color:var(--amber)} .log .error{color:var(--red)}
+  .reader{background:#070d18;border:1px solid var(--line);border-radius:9px;padding:14px;max-height:520px;overflow:auto;line-height:1.6;font-size:15px}
+  .reader h4{margin:14px 0 4px;color:var(--cyan);font-size:13px;letter-spacing:.5px}
+  .chat{max-height:380px;overflow:auto}
+  .msg{margin:8px 0;padding:9px 12px;border-radius:10px;max-width:92%}
+  .msg.u{background:#12243c;margin-left:auto} .msg.j{background:#0a1c22;border:1px solid #154553}
+  .msg small{display:block;color:var(--mute);font-size:11px;margin-bottom:2px}
+  .cover{width:96px;height:96px;border-radius:10px;background:#13233a center/cover;flex:none}
+  .toggle{display:flex;align-items:center;gap:8px;margin:6px 0;cursor:pointer}
+  .toggle input{width:16px;height:16px;accent-color:var(--cyan)}
+  .err{background:#2a0f17;border:1px solid #5a2230;color:#ffb3bf;padding:9px 11px;border-radius:8px;margin:8px 0;font-size:13px}
+  .hint{font-size:12px;color:var(--mute);margin-top:8px}
+  #toasts{position:fixed;right:18px;bottom:18px;display:flex;flex-direction:column;gap:8px;z-index:9}
+  .toast{background:#0e1c2f;border:1px solid var(--cyan);padding:10px 14px;border-radius:10px;max-width:380px;box-shadow:0 10px 30px rgba(0,0,0,.5);animation:in .2s}
+  .toast.bad{border-color:var(--red)}
+  @keyframes in{from{transform:translateY(8px);opacity:0}}
+  details summary{cursor:pointer;color:var(--cyan)}
+  @media (max-width:820px){.app{grid-template-columns:1fr}nav{position:static;height:auto;display:flex;flex-wrap:wrap;gap:4px;border-right:0;border-bottom:1px solid var(--line)}nav button{width:auto}.brand{width:100%;padding-bottom:8px}main{padding:14px}}
+</style>
+</head>
+<body>
+<div class="app">
+  <nav>
+    <div class="brand">J.A.R.V.I.S.<small>Painel de Controle</small></div>
+    <button data-tab="home" class="on"><span class="ico">◎</span>Visão geral</button>
+    <button data-tab="voice"><span class="ico">🎙</span>Comandos & voz</button>
+    <button data-tab="bible"><span class="ico">📖</span>Bíblia</button>
+    <button data-tab="spotify"><span class="ico">♫</span>Spotify</button>
+    <button data-tab="assist"><span class="ico">✦</span>Assistente</button>
+    <button data-tab="alarms"><span class="ico">⏰</span>Alarmes & notas</button>
+    <button data-tab="system"><span class="ico">⚙</span>Sistema</button>
+  </nav>
+  <main>
+    <div class="top">
+      <h1 id="title">Visão geral</h1>
+      <span class="chip"><span class="dot" id="dEsp"></span><span id="cEsp">ESP32</span></span>
+      <span class="chip"><span class="dot" id="dYv"></span>YouVersion</span>
+      <span class="chip"><span class="dot" id="dSp"></span>Spotify</span>
+      <span class="chip mono" id="cClock">--:--</span>
+      <a class="chip" href="/logout" style="text-decoration:none">Sair</a>
+    </div>
+
+    <!-- ================= VISAO GERAL ================= -->
+    <section id="home" class="on">
+      <div class="grid">
+        <div class="card">
+          <h3>ESP32 <span class="r small" id="hEspSeen"></span></h3>
+          <div class="kv" id="hEspKv"></div>
+          <div class="small muted" style="margin-top:10px">RAM livre</div><div class="bar"><i id="hHeap"></i></div>
+          <div class="small muted" style="margin-top:8px">Sinal WiFi</div><div class="bar"><i id="hRssi"></i></div>
+          <div class="row"><span class="small muted">Volume</span><input type="range" min="0" max="100" id="hVol" class="grow"><span id="hVolL" class="mono small">--</span></div>
+          <div class="row">
+            <button class="btn" onclick="esp({type:'mic'})">🎙 Ouvir agora</button>
+            <button class="btn" id="hMute" onclick="esp({type: S?.device?.muted ? 'mic_unmute' : 'mic_mute'})">🔇 Microfone mudo</button>
+            <button class="btn" onclick="esp({type:'test',mode:'chime'})">🔔 Testar som</button>
+          </div>
+          <div class="hint">Diga <b>“Jarvis”</b> e fale. Botão: toque = falar/interromper · segurar 2 s = microfone mudo.</div>
+        </div>
+
+        <div class="card">
+          <h3>Clima <span class="r small" id="hCity"></span></h3>
+          <div id="hWeather" class="muted">Carregando...</div>
+        </div>
+
+        <div class="card">
+          <h3>Plano de hoje <span class="r"><span class="tag" id="hVer">NVI</span></span></h3>
+          <div id="hPlanTitle" style="font-weight:600">—</div>
+          <div class="small muted" id="hPlanDay"></div>
+          <div class="bar"><i id="hPlanBar"></i></div>
+          <div class="row">
+            <button class="btn pri" onclick="espBible('read_plan_day')">🔊 Ler no Jarvis</button>
+            <button class="btn" onclick="openReader()">📄 Ver texto</button>
+            <button class="btn" onclick="espBible('next_plan_day')">⏭ Próximo dia</button>
+          </div>
+        </div>
+
+        <div class="card">
+          <h3>Spotify</h3>
+          <div style="display:flex;gap:12px;align-items:center">
+            <div class="cover" id="hCover"></div>
+            <div style="min-width:0"><div id="hTrack" style="font-weight:600">—</div><div class="small muted" id="hArtist"></div></div>
+          </div>
+          <div class="row">
+            <button class="btn sm" onclick="sp('previous')">⏮</button>
+            <button class="btn sm" onclick="sp('resume')">▶</button>
+            <button class="btn sm" onclick="sp('pause')">⏸</button>
+            <button class="btn sm" onclick="sp('next')">⏭</button>
+          </div>
+        </div>
+
+        <div class="card">
+          <h3>Próximos alarmes <span class="r"><button class="btn sm" onclick="go('alarms')">Gerenciar</button></span></h3>
+          <ul class="list" id="hAlarms"></ul>
+        </div>
+
+        <div class="card">
+          <h3>Cotações <span class="r"><button class="btn sm" id="qSpeak">🔊 Ler no Jarvis</button></span></h3>
+          <ul class="list" id="hQuotes"><li class="muted">Carregando...</li></ul>
+        </div>
+
+        <div class="card">
+          <h3>Notícias <span class="r"><button class="btn sm" onclick="assistSpeak('news')">🔊 Ler no Jarvis</button></span></h3>
+          <ul class="list small" id="hNews"><li class="muted">Carregando...</li></ul>
+        </div>
+
+        <div class="card">
+          <h3>Hoje no assistente <span class="r"><button class="btn sm" onclick="go('assist')">Abrir</button></span></h3>
+          <ul class="list" id="hToday"></ul>
+        </div>
+
+        <div class="card">
+          <h3>Fale com o Jarvis</h3>
+          <div class="row"><input class="grow" id="hAsk" placeholder="Ex: liga a luz da sala, qual o clima amanha..." onkeydown="if(event.key==='Enter')askFrom('hAsk')"><button class="btn pri" onclick="askFrom('hAsk')">Enviar</button></div>
+          <div class="row">
+            <button class="btn" onclick="esp({type:'briefing'})">☀️ Briefing no Jarvis</button>
+            <button class="btn" onclick="espBible('verse_of_day')">✨ Versículo do dia</button>
+          </div>
+          <div id="hLastConv" class="hint"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================= COMANDOS & VOZ ================= -->
+    <section id="voice">
+      <div class="grid two">
+        <div class="card">
+          <h3>Conversa com o Jarvis</h3>
+          <div class="chat" id="vChat"><div class="muted small">As conversas feitas por voz ou pelo painel aparecem aqui.</div></div>
+          <div class="row"><input class="grow" id="vAsk" placeholder="Digite um comando (passa pelo Gemini no ESP32)" onkeydown="if(event.key==='Enter')askFrom('vAsk')"><button class="btn pri" onclick="askFrom('vAsk')">Enviar</button></div>
+        </div>
+        <div class="card">
+          <h3>Fazer o Jarvis falar</h3>
+          <textarea id="vSay" placeholder="Texto que o Jarvis vai falar nos alto-falantes (pode ser longo)"></textarea>
+          <div class="row">
+            <button class="btn pri" onclick="sayEsp()">🔊 Falar no ESP32</button>
+            <button class="btn" onclick="previewTts(val('vSay'))">🎧 Ouvir aqui</button>
+          </div>
+          <div class="row">
+            <select id="vVoice" class="grow"></select>
+            <select id="vRate"><option value="-20%">Lento</option><option value="-10%">Calmo</option><option value="+0%">Normal</option><option value="+10%">Rápido</option><option value="+20%">Muito rapido</option></select>
+            <button class="btn" onclick="saveVoice()">Salvar voz</button>
+          </div>
+          <audio id="player" controls style="width:100%;margin-top:10px;display:none"></audio>
+        </div>
+        <div class="card">
+          <h3>Ações rápidas</h3>
+          <div class="row">
+            <button class="btn" onclick="esp({type:'briefing'})">☀️ Briefing</button>
+            <button class="btn" onclick="esp({type:'ask',text:'Como esta o clima agora?'})">🌦 Clima</button>
+            <button class="btn" onclick="esp({type:'ask',text:'Relatorio completo de status do sistema'})">📊 Status</button>
+            <button class="btn" onclick="esp({type:'mic'})">🎙 Microfone</button>
+          </div>
+          <div class="row">
+            <button class="btn" onclick="esp({type:'test',mode:'left'})">🔈 Esquerdo</button>
+            <button class="btn" onclick="esp({type:'test',mode:'right'})">🔊 Direito</button>
+            <button class="btn" onclick="esp({type:'test',mode:'chime'})">✨ Chime</button>
+            <button class="btn" onclick="esp({type:'test',mode:'alarm'})">🔔 Alarme</button>
+          </div>
+          <div class="row">
+            <button class="btn" onclick="esp({type:'ask',text:'Pausa a musica'})">⏸ Pausar música</button>
+            <button class="btn" onclick="esp({type:'ask',text:'Liga a luz da sala'})">💡 Luz da sala</button>
+            <button class="btn danger" onclick="if(confirm('Reiniciar o ESP32?'))esp({type:'restart'})">⟲ Reiniciar ESP32</button>
+          </div>
+          <div class="hint">Com este painel aberto o ESP32 consulta o Netlify a cada ~10 s (fora isso, a cada 3 min, para gastar poucos créditos). Alarmes, lembretes e timers rodam no próprio ESP32 e tocam mesmo sem internet.</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================= BIBLIA ================= -->
+    <section id="bible">
+      <div class="grid two">
+        <div class="card">
+          <h3>Conta YouVersion <span class="r small" id="bAcc"></span></h3>
+          <div id="bErr"></div>
+          <form action="/youversion/login" method="post" class="row">
+            <input class="grow" name="username" id="bUser" placeholder="E-mail ou usuário do App Bíblia" required>
+            <input class="grow" type="password" name="password" placeholder="Senha" required>
+            <button class="btn pri" type="submit">Entrar</button>
+          </form>
+          <div class="row">
+            <a class="btn" href="/youversion/sync">🔄 Sincronizar</a>
+            <button class="btn" onclick="espBible('sync')">🔄 Sincronizar pelo Jarvis</button>
+            <a class="btn" href="/youversion/debug" target="_blank">🩺 Diagnóstico</a>
+            <a class="btn danger" href="/youversion/logout">Sair</a>
+          </div>
+          <details style="margin-top:10px"><summary>Login com Google/Apple (colar token ou cookies)</summary>
+            <form action="/youversion/session" method="post" class="row">
+              <input class="grow" type="password" name="access_token" placeholder="Token Bearer / valor do cookie yva">
+              <input class="grow" type="password" name="session_cookie" placeholder="Cookies do bible.com (nome=valor; ...)">
+              <button class="btn" type="submit">Salvar</button>
+            </form>
+            <div class="hint">No navegador logado em www.bible.com: F12 → Application → Cookies → https://www.bible.com.</div>
+          </details>
+          <details style="margin-top:8px"><summary>Log da última sincronização <span id="bSync" class="small muted"></span></summary><div class="log" id="bLog"></div></details>
+        </div>
+
+        <div class="card">
+          <h3>Meus planos <span class="r"><select id="bVersion" onchange="setVersion(this.value)"><option>NVI</option><option>ARA</option><option>ARC</option><option>NVT</option></select></span></h3>
+          <ul class="list" id="bPlans"></ul>
+        </div>
+
+        <div class="card" style="grid-column:1/-1">
+          <h3>Leitor <span class="r small muted" id="rInfo"></span></h3>
+          <div class="row">
+            <select id="rPlan" class="grow"></select>
+            <span class="small muted">Dia</span><input type="number" id="rDay" min="1" value="1" style="width:80px">
+            <button class="btn pri" onclick="loadReader()">Carregar</button>
+            <button class="btn" onclick="previewTts('', readerKey)">🎧 Ouvir aqui</button>
+            <button class="btn" onclick="sayKeyEsp()">🔊 Falar no ESP32</button>
+          </div>
+          <div class="row">
+            <input class="grow" id="rRef" placeholder="Ou busque uma passagem: Salmos 23, João 3:16-18, Romanos 8:28" onkeydown="if(event.key==='Enter')loadPassage()">
+            <button class="btn" onclick="loadPassage()">Buscar passagem</button>
+          </div>
+          <div class="reader" id="rText" style="margin-top:12px"><span class="muted">Escolha um plano e um dia, ou busque uma passagem.</span></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================= SPOTIFY ================= -->
+    <section id="spotify">
+      <div class="grid two">
+        <div class="card">
+          <h3>Tocando agora <span class="r"><button class="btn sm" onclick="spNow()">Atualizar</button></span></h3>
+          <div style="display:flex;gap:16px;align-items:center">
+            <div class="cover" id="sCover" style="width:140px;height:140px"></div>
+            <div style="min-width:0;flex:1">
+              <div class="big" style="font-size:20px" id="sName">—</div>
+              <div class="muted" id="sArtist"></div>
+              <div class="small muted" id="sDev"></div>
+              <div class="bar"><i id="sProg"></i></div>
+              <div class="small muted mono" id="sTime"></div>
+            </div>
+          </div>
+          <div class="row">
+            <button class="btn" onclick="sp('previous')">⏮ Anterior</button>
+            <button class="btn pri" onclick="sp('resume')">▶ Tocar</button>
+            <button class="btn" onclick="sp('pause')">⏸ Pausar</button>
+            <button class="btn" onclick="sp('next')">⏭ Próxima</button>
+          </div>
+          <div class="row"><span class="small muted">Volume do Spotify</span><input type="range" min="0" max="100" value="60" class="grow" onchange="sp('volume','&volume='+this.value)"></div>
+        </div>
+        <div class="card">
+          <h3>Buscar e tocar</h3>
+          <div class="row">
+            <input class="grow" id="sQ" placeholder="Música, artista, album ou playlist" onkeydown="if(event.key==='Enter')spSearch()">
+            <select id="sType"><option value="track">Música</option><option value="artist">Artista</option><option value="album">Álbum</option><option value="playlist">Playlist</option></select>
+            <button class="btn pri" onclick="spSearch()">Tocar</button>
+          </div>
+          <div class="hint" id="sMsg"></div>
+          <details style="margin-top:14px"><summary>Conectar conta Spotify <span id="sConn" class="small muted"></span></summary>
+            <form action="/spotify/login" method="get" class="row">
+              <input class="grow" name="client_id" id="sCid" placeholder="Client ID" required>
+              <input class="grow" type="password" name="client_secret" placeholder="Client Secret" required>
+              <button class="btn" type="submit">Conectar</button>
+            </form>
+            <div class="hint">Redirect URI no Spotify Developer Dashboard: <code id="sRedir"></code></div>
+          </details>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================= ASSISTENTE ================= -->
+    <section id="assist">
+      <div class="grid two">
+        <div class="card">
+          <h3>Lembretes agendados <span class="r small muted">guardados no ESP32: tocam mesmo sem internet</span></h3>
+          <ul class="list" id="rList"></ul>
+          <div class="row">
+            <input class="grow" id="rmText" placeholder="Lembrar de... (ex: pagar a conta de luz)">
+          </div>
+          <div class="row">
+            <input type="date" id="rmDate"><input type="time" id="rmTime" value="09:00">
+            <select id="rmRepeat"><option value="none">Uma vez</option><option value="daily">Todo dia</option><option value="weekdays">Seg a sex</option><option value="weekly">Toda semana</option></select>
+            <button class="btn pri" onclick="addReminder()">Agendar</button>
+          </div>
+          <div class="hint">Por voz: "Jarvis, me lembra amanhã às 9 de pagar a conta" · "daqui a 20 minutos tirar o bolo do forno".</div>
+        </div>
+
+        <div class="card">
+          <h3>Listas <span class="r"><select id="lSel" onchange="renderLists()"></select></span></h3>
+          <ul class="list" id="lItems"></ul>
+          <div class="row">
+            <input class="grow" id="lAdd" placeholder="Itens separados por vírgula (ex: leite, pão e café)" onkeydown="if(event.key==='Enter')addListItems()">
+            <button class="btn pri" onclick="addListItems()">Adicionar</button>
+          </div>
+          <div class="row">
+            <input class="grow" id="lNew" placeholder="Nova lista (ex: tarefas, farmácia, ideias)">
+            <button class="btn" onclick="newList()">Criar</button>
+            <button class="btn sm" onclick="op({op:'list_clear_done',list:curList()})">Limpar marcados</button>
+            <button class="btn sm" onclick="assistSpeak('list_read',{list_name:curList()})">🔊 Ler</button>
+            <button class="btn sm danger" onclick="if(confirm('Apagar a lista '+curList()+'?'))op({op:'list_delete',list:curList()})">Apagar lista</button>
+          </div>
+        </div>
+
+        <div class="card">
+          <h3>Rotinas</h3>
+          <ul class="list" id="rtList"></ul>
+          <details id="rtEditor" style="margin-top:10px"><summary id="rtEdTitle">Nova rotina</summary>
+            <input type="hidden" id="rtId">
+            <div class="row"><input class="grow" id="rtName" placeholder="Nome (ex: Chegando em casa)"><input type="time" id="rtTime" title="Horário automático (opcional)"></div>
+            <div class="row small" id="rtDays"></div>
+            <textarea id="rtSteps" style="margin-top:8px;font-family:var(--mono);font-size:12px" placeholder="Um passo por linha:
+falar: Bem-vindo de volta, senhor.
+comando: liga a luz da sala
+musica: playlist jazz
+volume: 50
+esperar: 5
+briefing
+biblia: read_plan_day
+lista: compras
+som"></textarea>
+            <div class="row"><button class="btn pri" onclick="saveRoutine()">Salvar rotina</button><button class="btn" onclick="editRoutine(null)">Limpar</button></div>
+            <div class="hint">Passos: <b>falar</b>, <b>comando</b> (qualquer pedido ao Jarvis, ex: luzes), <b>musica</b>, <b>spotify</b> (pause/next), <b>volume</b>, <b>esperar</b> (segundos), <b>briefing</b>, <b>biblia</b>, <b>lista</b>, <b>som</b>. Por voz: "Jarvis, ativa a rotina boa noite".</div>
+          </details>
+        </div>
+
+        <div class="card">
+          <h3>Datas especiais</h3>
+          <ul class="list" id="dList"></ul>
+          <div class="row">
+            <input class="grow" id="dName" placeholder="Ex: Aniversário da mãe">
+            <input type="date" id="dDate">
+            <label class="toggle small"><input type="checkbox" id="dYearly" checked>Todo ano</label>
+            <button class="btn pri" onclick="addDate()">Guardar</button>
+          </div>
+          <div class="hint">Com o ano de nascimento, o Jarvis diz quantos anos a pessoa completa. Datas próximas entram no briefing.</div>
+        </div>
+
+        <div class="card" style="grid-column:1/-1">
+          <h3>Pesquisa rápida (Wikipédia)</h3>
+          <div class="row"><input class="grow" id="wQ" placeholder="Ex: Machu Picchu, buraco negro, Santos Dumont" onkeydown="if(event.key==='Enter')wiki()"><button class="btn pri" onclick="wiki()">Pesquisar</button><button class="btn" onclick="assistSpeak('wiki',{query:val('wQ')})">🔊 No Jarvis</button></div>
+          <div class="reader" id="wOut" style="margin-top:10px;display:none"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================= ALARMES & NOTAS ================= -->
+    <section id="alarms">
+      <div class="grid two">
+        <div class="card">
+          <h3>Alarmes <span class="r small muted">guardados no ESP32 (NVS): tocam offline</span></h3>
+          <ul class="list" id="aList"></ul>
+          <div class="row">
+            <input type="time" id="aTime" value="07:00">
+            <input class="grow" id="aLabel" placeholder="Rótulo (ex: Devocional matinal)">
+            <label class="toggle small"><input type="checkbox" id="aDaily" checked>Diário</label>
+            <button class="btn pri" onclick="addAlarm()">Adicionar</button>
+          </div>
+          <div class="hint">Dica: alarmes com <b>devocional</b>, <b>biblia</b> ou <b>briefing</b> no rotulo tocam e em seguida leem o briefing com o plano do dia.</div>
+          <div class="row"><button class="btn danger sm" onclick="if(confirm('Apagar todos os alarmes?'))esp({type:'alarm_clear'})">Apagar todos</button></div>
+        </div>
+        <div class="card">
+          <h3>Timers</h3>
+          <div class="row">
+            <button class="btn" onclick="timer(60)">1 min</button>
+            <button class="btn" onclick="timer(300)">5 min</button>
+            <button class="btn" onclick="timer(600)">10 min</button>
+            <button class="btn" onclick="timer(1500)">Pomodoro 25</button>
+          </div>
+          <div class="row"><input type="number" id="tMin" min="1" value="15" style="width:90px"><span class="small muted">min</span><input class="grow" id="tLabel" placeholder="Rótulo"><button class="btn" onclick="timer(val('tMin')*60,val('tLabel'))">Criar</button></div>
+          <div class="hint" id="tActive"></div>
+        </div>
+        <div class="card">
+          <h3>Lembretes / lista</h3>
+          <div id="nList" class="muted">—</div>
+          <div class="row"><input class="grow" id="nText" placeholder="Novo lembrete" onkeydown="if(event.key==='Enter')addNote()"><button class="btn pri" onclick="addNote()">Adicionar</button><button class="btn danger" onclick="if(confirm('Limpar a lista?'))esp({type:'notes_clear'})">Limpar</button></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================= SISTEMA ================= -->
+    <section id="system">
+      <div class="grid two">
+        <div class="card">
+          <h3>Eventos ao vivo <span class="r"><select id="eFilter" onchange="renderEvents()"><option value="">Todos</option><option>esp32</option><option>voz</option><option>painel</option><option>biblia</option><option>tts</option><option>spotify</option><option>briefing</option><option>lembrete</option><option>rotina</option><option>assistente</option><option>lista</option><option>config</option></select></span></h3>
+          <div class="log" id="eLog"></div>
+        </div>
+        <div class="card">
+          <h3>Configurações</h3>
+          <div class="row"><span class="small muted" style="width:120px">Seu nome</span><input class="grow" id="cfg_user_name" placeholder="Como o Jarvis te chama (vazio = senhor)"></div>
+          <div class="row"><span class="small muted" style="width:120px">Cidade (clima)</span><input class="grow" id="cfg_city"></div>
+          <div class="row"><span class="small muted" style="width:120px">Lat / Lon</span><input class="grow" id="cfg_latitude"><input class="grow" id="cfg_longitude"></div>
+          <div style="margin-top:12px" class="small muted">Voz (ESP32-S3):</div>
+          <label class="toggle"><input type="checkbox" id="cfg_wake_enabled">Ativar dizendo “Jarvis” (sem botão)</label>
+          <label class="toggle"><input type="checkbox" id="cfg_wake_sensitive">Palavra mais sensível (de longe; pode disparar sozinha às vezes · reinicia o ESP)</label>
+          <label class="toggle"><input type="checkbox" id="cfg_barge_in">“Jarvis” interrompe enquanto ele fala</label>
+          <label class="toggle"><input type="checkbox" id="cfg_follow_up">Continuar ouvindo quando o Jarvis faz uma pergunta</label>
+          <div style="margin-top:12px" class="small muted">O briefing inclui:</div>
+          <label class="toggle"><input type="checkbox" id="cfg_briefing_weather">Clima</label>
+          <label class="toggle"><input type="checkbox" id="cfg_briefing_alarms">Próximos alarmes</label>
+          <label class="toggle"><input type="checkbox" id="cfg_briefing_plan">Plano de leitura</label>
+          <label class="toggle"><input type="checkbox" id="cfg_briefing_plan_full">Ler o devocional completo</label>
+          <label class="toggle"><input type="checkbox" id="cfg_briefing_verse">Versículo do dia</label>
+          <label class="toggle"><input type="checkbox" id="cfg_briefing_reminders">Lembretes de hoje</label>
+          <label class="toggle"><input type="checkbox" id="cfg_briefing_dates">Aniversários e datas próximas</label>
+          <label class="toggle"><input type="checkbox" id="cfg_briefing_quotes">Cotações (dólar, euro, bitcoin)</label>
+          <label class="toggle"><input type="checkbox" id="cfg_briefing_news">3 manchetes de notícias</label>
+          <div class="row"><span class="small muted" style="width:120px">Tema das notícias</span><input class="grow" id="cfg_news_topic" placeholder="vazio = principais (ex: tecnologia, esportes)"></div>
+          <div class="row">
+            <button class="btn pri" onclick="saveSettings()">Salvar</button>
+            <button class="btn" onclick="testBriefing()">Gerar briefing (texto)</button>
+            <button class="btn" onclick="esp({type:'briefing'})">☀️ Briefing no Jarvis</button>
+          </div>
+          <div class="reader small" id="cBrief" style="display:none;margin-top:10px"></div>
+        </div>
+        <div class="card">
+          <h3>Chaves de API <span class="r small muted">ficam no Netlify Blobs; a do Groq vai para o ESP32</span></h3>
+          <div class="row"><span class="small muted" style="width:130px">Groq (voz → texto)</span><input class="grow" type="password" id="sec_groq_api_key"></div>
+          <div class="row"><span class="small muted" style="width:130px">Gemini (IA)</span><input class="grow" type="password" id="sec_gemini_api_key"></div>
+          <div class="row"><span class="small muted" style="width:130px">Modelo Gemini</span><input class="grow" id="sec_gemini_model"></div>
+          <div class="row"><span class="small muted" style="width:130px">Modelo Whisper</span><input class="grow" id="sec_stt_model"></div>
+          <div class="row"><span class="small muted" style="width:130px">Tuya Access ID</span><input class="grow" type="password" id="sec_tuya_access_id"></div>
+          <div class="row"><span class="small muted" style="width:130px">Tuya Secret</span><input class="grow" type="password" id="sec_tuya_access_secret"></div>
+          <div class="row"><span class="small muted" style="width:130px">Tuya host</span><input class="grow" id="sec_tuya_host" placeholder="openapi.tuyaus.com"></div>
+          <div class="row"><span class="small muted" style="width:130px">Webhook casa</span><input class="grow" id="sec_smart_webhook_url" placeholder="opcional (Home Assistant etc.)"></div>
+          <div class="row"><button class="btn pri" onclick="saveSecrets()">Salvar chaves</button><span class="small muted">Campos vazios mantêm o valor atual.</span></div>
+        </div>
+        <div class="card">
+          <h3>Casa inteligente (SmartLife / Tuya)</h3>
+          <ul class="list" id="smList"></ul>
+          <div class="row"><input class="grow" id="smName" placeholder="Nome falado (ex: luz da sala)"><input class="grow" id="smAlias" placeholder="Apelidos (sala, lâmpada)"></div>
+          <div class="row"><input class="grow" id="smId" placeholder="Device ID da Tuya"><select id="smCode"><option>switch_led</option><option>switch_1</option><option>switch</option></select><label class="toggle small"><input type="checkbox" id="smRgb">RGB</label><button class="btn pri" onclick="addDevice()">Adicionar</button></div>
+        </div>
+
+        <div class="card">
+          <h3>Servidor</h3>
+          <div class="kv" id="sysKv"></div>
+          <div class="row"><a class="btn" href="/youversion/debug" target="_blank">Diagnóstico YouVersion</a><a class="btn" href="/api/state" target="_blank">Estado (JSON)</a></div>
+          <div class="hint">O Netlify só roda quando alguém chama (voz, painel ou sync do ESP32): sem servidor ligado 24 h e sem custo no plano free.</div>
+        </div>
+      </div>
+    </section>
+  </main>
+</div>
+<div id="toasts"></div>
+
+<script>
+const $ = id => document.getElementById(id);
+const val = id => ($(id).value || '').trim();
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+let S = null, events = [], lastEv = 0, evInit = false, readerKey = 'preview';
+
+function toast(msg, bad){ const t=document.createElement('div'); t.className='toast'+(bad?' bad':''); t.textContent=msg; $('toasts').appendChild(t); setTimeout(()=>t.remove(), 4200); }
+async function api(path, opts={}){
+  try{
+    const r = await fetch(path, opts);
+    const ct = r.headers.get('content-type')||'';
+    const d = ct.includes('json') ? await r.json() : await r.text();
+    if(r.status===401){ location.href='/login'; return null; }
+    if(!r.ok){ toast((d && d.error) || ('Erro HTTP '+r.status), true); return null; }
+    return d;
+  }catch(e){ toast('Servidor indisponível: '+e.message, true); return null; }
+}
+const post = (path, body) => api(path, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
+
+// ---------- navegacao
+const TITLES={assist:'Assistente',home:'Visão geral',voice:'Comandos & voz',bible:'Bíblia',spotify:'Spotify',alarms:'Alarmes & notas',system:'Sistema'};
+function go(tab){
+  document.querySelectorAll('nav button').forEach(b=>b.classList.toggle('on', b.dataset.tab===tab));
+  document.querySelectorAll('section').forEach(s=>s.classList.toggle('on', s.id===tab));
+  $('title').textContent = TITLES[tab]; history.replaceState(null,'','#'+tab);
+  if(tab==='spotify') spNow();
+}
+document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>go(b.dataset.tab));
+
+// ---------- comandos para o ESP32
+async function esp(cmd){
+  const d = await post('/api/esp/send', cmd);
+  if(d && d.ok){ toast(S?.device?.online ? 'Enviado ✓ o Jarvis executa em até ~10 s' : 'ESP32 offline: comando na fila (vale por 15 min)'); setTimeout(refresh, 11000); }
+  else if(d) toast(d.error||'Falha', true);
+}
+const espBible = action => esp({type:'bible', action});
+async function askFrom(id){
+  const t=val(id); if(!t) return; $(id).value=''; toast('Pensando...');
+  const d = await post('/api/ask', {text:t, speak:true});
+  if(d){ toast('Jarvis: '+d.reply.slice(0,160)); refresh(); }
+}
+function sayEsp(){ const t=val('vSay'); if(!t) return toast('Digite um texto', true); esp({type:'speak', text:t}); }
+function sayKeyEsp(){ esp({type:'say_key', key:readerKey, text: ($('rText').innerText||'').slice(0,280)}); }
+function timer(sec, label){ sec=parseInt(sec,10); if(!sec) return; esp({type:'timer', sec, label: label||('timer de '+Math.round(sec/60)+' minutos')}); }
+function addAlarm(){ const [h,m]=(val('aTime')||'07:00').split(':'); esp({type:'alarm_add', h:+h, m:+m, label: val('aLabel')||'Despertador', r: $('aDaily').checked}); }
+function addNote(){ const t=val('nText'); if(!t) return; $('nText').value=''; esp({type:'note_add', text:t}); }
+
+function previewTts(text, key){
+  const st = S?.settings || {};
+  const voice = $('vVoice').value || st.voice, rate = $('vRate').value || st.rate;
+  let q = key ? 'key='+encodeURIComponent(key) : 'text='+encodeURIComponent(text||'Olá, eu sou o Jarvis.');
+  const p=$('player'); p.style.display='block'; p.src='/api/tts?'+q+'&voice='+encodeURIComponent(voice)+'&rate='+encodeURIComponent(rate); p.play().catch(()=>{});
+  if(!$('voice').classList.contains('on')) toast('Gerando áudio... (player na aba Comandos & voz)');
+}
+async function saveVoice(){ const d=await post('/api/settings',{voice:$('vVoice').value, rate:$('vRate').value}); if(d) toast('Voz salva'); }
+
+// ---------- spotify
+async function sp(action, extra=''){ const d=await api('/api/spotify?action='+action+extra); if(d){ toast(d.message); setTimeout(spNow, 900);} }
+async function spSearch(){ const q=val('sQ'); if(!q) return; $('sMsg').textContent='Buscando...'; const d=await api('/api/spotify?action=play_query&q='+encodeURIComponent(q)+'&type='+$('sType').value); if(d){ $('sMsg').textContent=d.message; setTimeout(spNow,1200);} }
+const mmss = ms => { const s=Math.floor((ms||0)/1000); return Math.floor(s/60)+':'+String(s%60).padStart(2,'0'); };
+async function spNow(){
+  if(!S?.spotify?.connected) return;
+  const d = await api('/api/spotify?action=now_playing'); if(!d) return;
+  const img = d.image ? `url("${d.image}")` : '';
+  ['hCover','sCover'].forEach(i=>$(i).style.backgroundImage=img);
+  $('hTrack').textContent = $('sName').textContent = d.name || d.track || 'Nada tocando';
+  $('hArtist').textContent = $('sArtist').textContent = d.artist ? d.artist + (d.album?' — '+d.album:'') : '';
+  $('sDev').textContent = d.device ? (d.is_playing?'▶ ':'⏸ ')+'em '+d.device : '';
+  $('sProg').style.width = d.duration_ms ? (100*d.progress_ms/d.duration_ms)+'%' : '0';
+  $('sTime').textContent = d.duration_ms ? mmss(d.progress_ms)+' / '+mmss(d.duration_ms) : '';
+}
+
+// ---------- biblia
+async function setVersion(v){ await api('/api/bible/youversion?action=verse_of_day&version='+v); toast('Tradução: '+v); refresh(); }
+function openReader(){ go('bible'); if(S){ $('rPlan').value=S.youversion.active_plan_id||''; $('rDay').value=S.youversion.current_day||1; } loadReader(); }
+function renderReading(d){
+  let h = `<div style="font-weight:700;font-size:16px">${esc(d.title||'')}</div>`;
+  if(d.day) h += `<div class="small muted">Dia ${d.day}${d.total_days?' de '+d.total_days:''} · fonte: ${esc(d.source||'')}</div>`;
+  if(d.devotional) h += `<h4>DEVOCIONAL</h4><div>${esc(d.devotional)}</div>`;
+  (d.readings||[]).forEach(r=> h += `<h4>${esc(r.label)}</h4><div>${esc(r.text)}</div>`);
+  if(d.url) h += `<div class="hint"><a href="${esc(d.url)}" target="_blank">Abrir no bible.com ↗</a></div>`;
+  $('rText').innerHTML = h;
+}
+async function loadReader(){
+  const plan=$('rPlan').value, day=parseInt($('rDay').value||'1',10);
+  $('rText').innerHTML='<span class="muted">Baixando do YouVersion...</span>';
+  const d=await api(`/api/bible/preview?plan=${encodeURIComponent(plan)}&day=${day}`);
+  if(!d) return;
+  if(!d.ok){ $('rText').innerHTML=`<div class="err">${esc(d.error)}</div>`; return; }
+  renderReading(d); readerKey = 'preview'; $('rInfo').textContent = (d.spoken||'').length+' caracteres';
+}
+async function loadPassage(){
+  const ref=val('rRef'); if(!ref) return;
+  const d=await api('/api/bible/youversion?action=get_passage&ref='+encodeURIComponent(ref)); if(!d) return;
+  renderReading({title:d.reference, readings:[{label:d.reference, text:d.text}], url:d.url});
+  readerKey = 'last';
+}
+async function activatePlan(id){ const d=await api('/api/bible/youversion?action=start_plan&plan='+encodeURIComponent(id)); if(d){ toast('Plano ativo: '+(d.plan_title||'')); refresh(); } }
+function readPlanDay(id, day){ $('rPlan').value=id; $('rDay').value=day; loadReader(); $('rText').scrollIntoView({behavior:'smooth'}); }
+
+// ---------- chaves e casa
+const SECS=['groq_api_key','gemini_api_key','gemini_model','stt_model','tuya_access_id','tuya_access_secret','tuya_host','smart_webhook_url'];
+function fillSecrets(sv){ SECS.forEach(k=>{ const el=$('sec_'+k); if(!el||document.activeElement===el||el.dataset.dirty) return; const v=sv[k]||{}; if(el.type==='password'){ el.value=''; el.placeholder = v.set ? 'configurada ('+v.value+')' : 'não configurada'; } else el.value=v.value||''; }); }
+SECS.forEach(k=>{ const el=$('sec_'+k); if(el) el.oninput=()=>el.dataset.dirty='1'; });
+async function saveSecrets(){ const b={}; SECS.forEach(k=>{ const el=$('sec_'+k); if(el.dataset.dirty){ b[k]=el.value.trim(); delete el.dataset.dirty; } }); const d=await post('/api/secrets', b); if(d){ toast('Chaves salvas'); refresh(); } }
+function renderDevices(){
+  const devs=S.smart_devices||[];
+  $('smList').innerHTML = devs.map((d,i)=>`<li><div class="grow"><b>${esc(d.name)}</b><div class="small muted">${esc(d.aliases||'')} · ${esc(d.device_id||'sem ID')} · ${esc(d.switch_code)}${d.rgb?' · RGB':''}</div></div>
+    <button class="btn sm" onclick="smartCtl(${i},'on')">Ligar</button><button class="btn sm" onclick="smartCtl(${i},'off')">Desligar</button><button class="btn sm danger" onclick="delDevice(${i})">✕</button></li>`).join('') || '<li class="muted">Nenhum dispositivo. Por voz: "Jarvis, liga a luz da sala".</li>';
+}
+async function saveDevices(devs){ const d=await post('/api/smart/devices',{devices:devs}); if(d){ S.smart_devices=d.devices; renderDevices(); } }
+function addDevice(){ const n=val('smName'); if(!n) return toast('Dê um nome', true); saveDevices([...(S.smart_devices||[]), {name:n, aliases:val('smAlias'), device_id:val('smId'), switch_code:$('smCode').value, rgb:$('smRgb').checked}]); ['smName','smAlias','smId'].forEach(i=>$(i).value=''); }
+function delDevice(i){ const d=[...S.smart_devices]; d.splice(i,1); saveDevices(d); }
+async function smartCtl(i, state){ const d=await post('/api/smart/control',{name:S.smart_devices[i].name, state}); if(d) toast(d.message); }
+
+// ---------- configuracoes
+const CFG=['user_name','city','latitude','longitude','wake_enabled','wake_sensitive','barge_in','follow_up','briefing_weather','briefing_alarms','briefing_plan','briefing_plan_full','briefing_verse','briefing_reminders','briefing_dates','briefing_quotes','briefing_news','news_topic'];
+function fillSettings(st){ CFG.forEach(k=>{ const el=$('cfg_'+k); if(!el || document.activeElement===el) return; if(el.type==='checkbox') el.checked=!!st[k]; else el.value=st[k]??''; }); }
+async function saveSettings(){ const b={}; CFG.forEach(k=>{ const el=$('cfg_'+k); b[k]= el.type==='checkbox'? el.checked : el.value; }); const d=await post('/api/settings',b); if(d){ toast('Configurações salvas'); loadWeather(true);} }
+async function testBriefing(){ $('cBrief').style.display='block'; $('cBrief').textContent='Gerando...'; const d=await api('/api/briefing'); if(d) $('cBrief').textContent=d.spoken; }
+
+// ---------- clima
+async function loadWeather(force){
+  const w = await api('/api/weather'+(force?'?force=1':'')); if(!w) return;
+  $('hCity').textContent = w.city||'';
+  if(!w.ok){ $('hWeather').innerHTML=`<span class="muted">${esc(w.error)}</span>`; return; }
+  const days=(w.days||[]).map((d,i)=>`<div style="flex:1"><div class="small muted">${i===0?'Hoje':i===1?'Amanhã':d.date.slice(8)+'/'+d.date.slice(5,7)}</div><div class="mono">${Math.round(d.max)}° / ${Math.round(d.min)}°</div><div class="small muted">☂ ${d.rain??'-'}% · ${esc(d.desc)}</div></div>`).join('');
+  $('hWeather').innerHTML = `<div style="display:flex;align-items:baseline;gap:10px"><div class="big">${Math.round(w.temp)}°</div><div>${esc(w.desc)}<div class="small muted">sensação ${Math.round(w.feels)}° · umidade ${w.humidity}% · vento ${Math.round(w.wind)} km/h</div></div></div><div class="row" style="gap:12px;margin-top:14px">${days}</div>`;
+}
+
+// ---------- render do estado
+const fmtUp = s => { s=+s||0; const d=Math.floor(s/86400), h=Math.floor(s%86400/3600), m=Math.floor(s%3600/60); return (d?d+'d ':'')+h+'h '+m+'m'; };
+function dot(id, cls){ $(id).className='dot '+cls; }
+function render(){
+  const s=S, dev=s.device, yv=s.youversion;
+  dot('dEsp', dev.online?'ok':(dev.last_seen_ago!=null?'bad':'warn'));
+  $('cEsp').textContent = dev.online ? 'ESP32 online' : (dev.last_seen_ago!=null ? 'ESP32 offline' : 'ESP32 nunca conectou');
+  dot('dYv', yv.has_token?'ok':(yv.logged_in?'warn':'bad'));
+  dot('dSp', s.spotify.connected?'ok':'bad');
+  $('cClock').textContent = s.server.time.slice(11,16);
+
+  // ESP32
+  $('hEspSeen').textContent = dev.last_seen_ago!=null ? 'visto há '+dev.last_seen_ago+' s' : '';
+  $('hEspKv').innerHTML = dev.ip ? `<span>IP</span><span class="mono">${esc(dev.ip)}</span><span>Uptime</span><span>${fmtUp(dev.uptime)}</span><span>RAM</span><span>${dev.heap??'?'} KB (min ${dev.min_heap??'?'} KB) · PSRAM ${dev.psram??'?'} KB</span><span>Microfone</span><span>${dev.muted?'🔇 mudo':(dev.wake?'👂 ouvindo “Jarvis”':'botão')} · ${dev.wakes||0} ativações</span><span>WiFi</span><span>${dev.rssi??'?'} dBm</span><span>Firmware</span><span>${esc(dev.fw||'?')}${dev.busy?' · falando/ouvindo':''}</span>${dev.queue?`<span>Fila</span><span>${dev.queue} comando(s)</span>`:''}`
+                               : '<span>Status</span><span class="muted">Aguardando o ESP32 conectar. Confira NETLIFY_URL e DEVICE_TOKEN no secrets_local.h.</span>';
+  $('hHeap').style.width = Math.min(100, (dev.heap||0)/300*100)+'%';
+  $('hMute').textContent = dev.muted ? '🎙 Ativar microfone' : '🔇 Microfone mudo';
+  $('hRssi').style.width = dev.rssi ? Math.max(0, Math.min(100, (dev.rssi+95)/60*100))+'%' : '0';
+  if(document.activeElement!==$('hVol') && dev.volume!=null){ $('hVol').value=dev.volume; $('hVolL').textContent=dev.volume+'%'; }
+
+  // plano
+  $('hPlanTitle').textContent = yv.active_plan_title || '—';
+  $('hPlanDay').textContent = `Dia ${yv.current_day||1} de ${yv.total_days||'?'}` + (yv.logged_in?'':' · conecte sua conta na aba Bíblia');
+  $('hPlanBar').style.width = yv.total_days ? (100*Math.max(0,(yv.current_day||1)-1)/yv.total_days)+'%' : '0';
+  $('hVer').textContent = yv.version; if(document.activeElement!==$('bVersion')) $('bVersion').value = yv.version;
+
+  // alarmes
+  const al = (s.alarms||[]).slice().sort((a,b)=>(a.h*60+a.m)-(b.h*60+b.m));
+  const now=new Date(), nm=now.getHours()*60+now.getMinutes();
+  const next = al.filter(a=>a.h*60+a.m>nm).concat(al.filter(a=>a.h*60+a.m<=nm));
+  const fmt = a => String(a.h).padStart(2,'0')+':'+String(a.m).padStart(2,'0');
+  $('hAlarms').innerHTML = next.slice(0,4).map(a=>`<li><span class="mono" style="font-size:18px">${fmt(a)}</span><span class="grow">${esc(a.l)}</span><span class="tag">${a.r?'diário':'único'}</span></li>`).join('') || '<li class="muted">Nenhum alarme</li>';
+  $('aList').innerHTML = al.map(a=>`<li><span class="mono" style="font-size:18px">${fmt(a)}</span><span class="grow">${esc(a.l)}</span><span class="tag">${a.r?'diário':'único'}</span><button class="btn sm danger" onclick="esp({type:'alarm_remove',h:${a.h},m:${a.m}})">Remover</button></li>`).join('') || '<li class="muted">Nenhum alarme salvo</li>';
+  $('tActive').innerHTML = (s.timers||[]).map(t=>`⏲ ${esc(t.label)} — ${Math.floor(Math.max(0,t.left)/60)}:${String(Math.max(0,t.left)%60).padStart(2,'0')}`).join('<br>') || '<span class="muted">Nenhum timer ativo</span>';
+  $('nList').innerHTML = (s.notes||[]).length ? s.notes.map(n=>'• '+esc(n)).join('<br>') : '<span class="muted">Lista vazia</span>';
+
+  // conversas
+  const conv = s.conversations||[];
+  const lc = conv[conv.length-1];
+  $('hLastConv').innerHTML = lc ? `<b>Voce:</b> ${esc(lc.user)}<br><b>Jarvis:</b> ${esc(lc.reply).slice(0,260)}` : '';
+  $('vChat').innerHTML = conv.map(c=>`<div class="msg u"><small>${esc(c.time)}</small>${esc(c.user)}</div><div class="msg j"><small>Jarvis</small>${esc(c.reply)}</div>`).join('') || '<div class="muted small">As conversas feitas por voz ou pelo painel aparecem aqui.</div>';
+
+  // youversion
+  $('bAcc').innerHTML = yv.has_token ? `<span class="tag on">conectado: ${esc(yv.user||yv.email)} · ${esc(yv.auth_method)}</span>` : (yv.logged_in?'<span class="tag">sessão sem token</span>':'<span class="tag">não conectado</span>');
+  $('bErr').innerHTML = yv.auth_error ? `<div class="err">${esc(yv.auth_error)}</div>` : '';
+  if(document.activeElement!==$('bUser')) $('bUser').value = yv.email||'';
+  $('bSync').textContent = yv.last_sync ? '('+yv.last_sync+')' : '';
+  $('bLog').textContent = (yv.sync_log||[]).join('\n') || '(vazio)';
+  const plans = yv.plans||[];
+  $('bPlans').innerHTML = plans.map(p=>{
+    const act = String(p.plan_id)===String(yv.active_plan_id);
+    const pct = p.total_days ? Math.round(100*Math.max(0,(p.current_day||1)-1)/p.total_days) : 0;
+    return `<li><div class="grow"><div style="font-weight:600">${act?'▶ ':''}${esc(p.title)}</div><div class="small muted">Dia ${p.current_day} de ${p.total_days}${p.completed?' · concluído':''}${p.saved_only?' · salvo':''}</div><div class="bar"><i style="width:${pct}%"></i></div></div>
+      <button class="btn sm" onclick="readPlanDay('${esc(p.plan_id)}',${p.current_day||1})">Ler</button>${act?'<span class="tag on">ativo</span>':`<button class="btn sm" onclick="activatePlan('${esc(p.plan_id)}')">Ativar</button>`}</li>`;
+  }).join('') || '<li class="muted">Nenhum plano sincronizado. Entre na sua conta ao lado.</li>';
+  const sel=$('rPlan'), cur=sel.value;
+  const opts = (plans.length?plans:[{plan_id:yv.active_plan_id,title:yv.active_plan_title}]).map(p=>`<option value="${esc(p.plan_id)}">${esc(p.title)}</option>`).join('');
+  if(sel.dataset.sig!==opts){ sel.innerHTML=opts; sel.dataset.sig=opts; sel.value = cur || yv.active_plan_id || ''; }
+
+  // spotify
+  $('sConn').textContent = s.spotify.connected ? '(conectado)' : '(não conectado)';
+  $('sRedir').textContent = s.spotify.redirect_uri||''; if(document.activeElement!==$('sCid')) $('sCid').value = s.spotify.client_id||'';
+  if(!s.spotify.connected){ $('hTrack').textContent='Spotify não conectado'; }
+
+  // voz / config
+  const vs=$('vVoice'); if(!vs.options.length){ vs.innerHTML=(s.voices||[]).map(v=>`<option value="${v.id}">${esc(v.label)}</option>`).join(''); vs.value=s.settings.voice; $('vRate').value=s.settings.rate; }
+  fillSettings(s.settings); fillSecrets(s.secrets||{}); renderDevices();
+  $('sysKv').innerHTML = `<span>Hora do servidor</span><span>${esc(s.server.time)}</span><span>Função aquecida há</span><span>${fmtUp(s.server.uptime)}</span><span>Voz</span><span>${esc(s.settings.voice)} (${esc(s.settings.rate)})</span><span>Senha do painel</span><span>${s.server.configured.panel?'definida':'<b style="color:var(--red)">PANEL_PASSWORD não definida</b>'}</span><span>Token do ESP32</span><span>${s.server.configured.device?'definido':'<b style="color:var(--red)">DEVICE_TOKEN não definido</b>'}</span>`;
+}
+async function refresh(){
+  if(document.hidden) return;
+  const d=await api('/api/state?after='+lastEv); if(!d) return;
+  S=d; render(); takeEvents(d.events||[]);
+}
+
+// ---------- eventos
+function renderEvents(){
+  const f=$('eFilter').value;
+  $('eLog').innerHTML = events.filter(e=>!f||e.kind===f).slice(-250).reverse().map(e=>`<div class="e ${e.level}">${e.time} [${esc(e.kind)}] ${esc(e.msg)}</div>`).join('') || '<span class="muted">Sem eventos ainda.</span>';
+}
+function takeEvents(evs){
+  const d={events:evs};
+  { if(d.events.length){ events=events.concat(d.events).slice(-400); lastEv=d.events[d.events.length-1].id; renderEvents();
+      if(d.events.some(e=>['lembrete','lista','assistente','rotina'].includes(e.kind))) loadAssist();
+      if(evInit) d.events.filter(e=>e.kind==='voz'||e.level==='error').forEach(e=>toast(e.msg.slice(0,140), e.level==='error')); }
+    evInit = true;
+  }
+}
+
+// ---------- assistente
+let A = null;
+const DAYN = ['Seg','Ter','Qua','Qui','Sex','Sáb','Dom'];
+const op = async b => { const d = await post('/api/assistant/op', b); if(d){ if(d.spoken) toast(d.spoken, d.ok===false); else if(d.error) toast(d.error, true); loadAssist(); } return d; };
+async function assistSpeak(action, extra={}){
+  const qs = new URLSearchParams({action, ...extra}).toString();
+  const d = await api('/api/assistant?'+qs); if(!d) return;
+  esp({type:'say_key', key:'last', text:(d.spoken||'').slice(0,280)});
+}
+function curList(){ return $('lSel').value || 'compras'; }
+function fmtDate(iso){ const [y,m,d]=iso.split('-'); const dt=new Date(+y,m-1,+d); const t=new Date(); t.setHours(0,0,0,0); const diff=Math.round((dt-t)/864e5);
+  return diff===0?'Hoje':diff===1?'Amanhã':DAYN[(dt.getDay()+6)%7]+' '+d+'/'+m; }
+const REP={none:'uma vez',daily:'todo dia',weekdays:'seg a sex',weekly:'semanal'};
+function renderAssist(){
+  if(!A) return;
+  $('rList').innerHTML = A.reminders.map(r=>`<li><span class="mono">${fmtDate(r.date)} ${r.time}</span><span class="grow">${esc(r.text)}</span><span class="tag">${REP[r.repeat]||''}</span><button class="btn sm danger" onclick="op({op:'reminder_remove',id:'${r.id}'})">✕</button></li>`).join('') || '<li class="muted">Nenhum lembrete agendado</li>';
+  const names = Object.keys(A.lists); if(!names.includes('compras')) names.unshift('compras');
+  const sel=$('lSel'), cur=sel.value; const opts=names.map(n=>`<option>${esc(n)}</option>`).join('');
+  if(sel.dataset.sig!==opts){ sel.innerHTML=opts; sel.dataset.sig=opts; sel.value = names.includes(cur)?cur:names[0]; }
+  renderLists();
+  $('rtList').innerHTML = A.routines.map(r=>`<li><div class="grow"><b>${esc(r.name)}</b><div class="small muted">${r.time?('⏱ '+r.time+' · '+(r.days.length===7?'todo dia':r.days.map(d=>DAYN[d]).join(' '))):'manual'}${r.last_run?' · última: '+esc(r.last_run.replace('T',' ')):''}</div></div>
+     <button class="btn sm pri" onclick="op({op:'routine_run',id:'${r.id}'})">▶</button><button class="btn sm" onclick="editRoutine('${r.id}')">Editar</button><button class="btn sm danger" onclick="if(confirm('Apagar rotina?'))op({op:'routine_delete',id:'${r.id}'})">✕</button></li>`).join('') || '<li class="muted">Nenhuma rotina</li>';
+  if(!$('rtDays').childElementCount) $('rtDays').innerHTML = DAYN.map((d,i)=>`<label class="toggle"><input type="checkbox" value="${i}" checked>${d}</label>`).join('');
+  $('dList').innerHTML = A.dates.map(e=>`<li><span class="mono" style="min-width:70px">${e.days_left===0?'HOJE':e.days_left+' dias'}</span><span class="grow">${esc(e.name)}${e.years?` <span class="small muted">(${e.years} anos)</span>`:''}<div class="small muted">${e.next.split('-').reverse().join('/')}</div></span><button class="btn sm danger" onclick="op({op:'date_remove',id:'${e.id}'})">✕</button></li>`).join('') || '<li class="muted">Nenhuma data cadastrada</li>';
+  const today = new Date().toISOString().slice(0,10);
+  const hrs = A.reminders.filter(r=>fmtDate(r.date)==='Hoje').map(r=>`<li><span class="mono">${r.time}</span><span class="grow">${esc(r.text)}</span><span class="tag">lembrete</span></li>`);
+  const hds = A.dates.filter(e=>e.days_left<=7).map(e=>`<li><span class="mono">${e.days_left===0?'HOJE':e.days_left+'d'}</span><span class="grow">${esc(e.name)}</span><span class="tag">data</span></li>`);
+  const shop = (A.lists.compras||[]).filter(i=>!i.done).length;
+  $('hToday').innerHTML = hrs.concat(hds).join('') + (shop?`<li><span class="mono">🛒</span><span class="grow">${shop} ite${shop>1?'ns':'m'} na lista de compras</span></li>`:'') || '<li class="muted">Nada agendado para hoje</li>';
+}
+function renderLists(){
+  const key=curList(), items=(A?.lists?.[key])||[];
+  $('lItems').innerHTML = items.map((it,i)=>`<li><input type="checkbox" ${it.done?'checked':''} onchange="op({op:'list_toggle',list:'${esc(key)}',index:${i}})" style="width:17px;height:17px;accent-color:var(--cyan)"><span class="grow" style="${it.done?'text-decoration:line-through;color:var(--mute)':''}">${esc(it.text)}</span><button class="btn sm danger" onclick="op({op:'list_remove_index',list:'${esc(key)}',index:${i}})">✕</button></li>`).join('') || '<li class="muted">Lista vazia</li>';
+}
+async function loadAssist(){ const d=await api('/api/assistant/data'); if(d){ A=d; renderAssist(); } }
+function addReminder(){ const t=val('rmText'); if(!t) return toast('Digite o lembrete', true); op({op:'reminder_add', text:t, date:val('rmDate')||'hoje', time:val('rmTime')||'09:00', repeat:$('rmRepeat').value}); $('rmText').value=''; }
+function addListItems(){ const t=val('lAdd'); if(!t) return; $('lAdd').value=''; op({op:'list_add', list:curList(), items:t}); }
+function newList(){ const n=val('lNew').toLowerCase(); if(!n) return; $('lNew').value=''; A.lists[n]=A.lists[n]||[]; renderAssist(); $('lSel').value=n; renderLists(); toast('Lista '+n+' criada: adicione itens'); }
+function addDate(){ const n=val('dName'), d=val('dDate'); if(!n||!d) return toast('Preencha nome e data', true); op({op:'date_add', name:n, date:d, yearly:$('dYearly').checked}); $('dName').value=''; }
+function editRoutine(id){
+  const r = A.routines.find(x=>x.id===id) || {id:'',name:'',steps_text:'',time:'',days:[0,1,2,3,4,5,6]};
+  $('rtId').value=r.id; $('rtName').value=r.name; $('rtSteps').value=r.steps_text; $('rtTime').value=r.time||'';
+  $('rtDays').querySelectorAll('input').forEach(c=>c.checked=r.days.includes(+c.value));
+  $('rtEdTitle').textContent = id ? 'Editando: '+r.name : 'Nova rotina'; $('rtEditor').open = true;
+}
+async function saveRoutine(){
+  const days=[...$('rtDays').querySelectorAll('input:checked')].map(c=>+c.value);
+  const d = await op({op:'routine_save', id:$('rtId').value, name:val('rtName'), steps_text:$('rtSteps').value, time:val('rtTime'), days});
+  if(d && d.ok){ toast('Rotina salva ('+d.steps.length+' passos reconhecidos)'); editRoutine(null); $('rtEditor').open=false; }
+}
+async function wiki(){
+  const q=val('wQ'); if(!q) return; $('wOut').style.display='block'; $('wOut').textContent='Pesquisando...';
+  const d=await api('/api/wiki?q='+encodeURIComponent(q)); if(!d) return;
+  $('wOut').innerHTML = d.ok ? `<div style="font-weight:700">${esc(d.title)}</div><div>${esc(d.extract)}</div>${d.url?`<div class="hint"><a href="${esc(d.url)}" target="_blank">Abrir na Wikipédia ↗</a></div>`:''}` : `<span class="muted">${esc(d.spoken)}</span>`;
+}
+async function loadInfo(){
+  const q=await api('/api/quotes');
+  if(q) $('hQuotes').innerHTML = q.ok ? q.quotes.map(x=>`<li><span class="grow">${x.name}</span><span class="mono">R$ ${x.bid.toLocaleString('pt-BR',x.bid>1000?{maximumFractionDigits:0}:{minimumFractionDigits:2,maximumFractionDigits:2})}</span><span class="tag" style="color:${x.pct>0?'var(--green)':x.pct<0?'var(--red)':'var(--mute)'}">${x.pct>0?'▲':x.pct<0?'▼':'■'} ${Math.abs(x.pct).toFixed(2)}%</span></li>`).join('') : `<li class="muted">${esc(q.error)}</li>`;
+  const n=await api('/api/news?topic='+encodeURIComponent(S?.settings?.news_topic||''));
+  if(n) $('hNews').innerHTML = n.ok ? n.items.slice(0,5).map(x=>`<li><span class="grow"><a href="${esc(x.link)}" target="_blank" style="color:var(--text);text-decoration:none">${esc(x.title)}</a><div class="small muted">${esc(x.source)}</div></span></li>`).join('') : `<li class="muted">${esc(n.error)}</li>`;
+}
+$('qSpeak').onclick = () => assistSpeak('quotes');
+
+// ---------- inicio
+$('hVol').oninput = e => $('hVolL').textContent = e.target.value+'%';
+$('hVol').onchange = e => esp({type:'volume', v:+e.target.value});
+const qs = new URLSearchParams(location.search);
+if(qs.get('youversion')){ const m={ok:'Conta YouVersion conectada!',error:'Falha no login do YouVersion (veja o erro na aba Bíblia)',synced:'Planos sincronizados',logout:'Desconectado do YouVersion',session_ok:'Sessão salva',missing:'Preencha usuário e senha'}; toast(m[qs.get('youversion')]||'OK', qs.get('youversion')==='error'); history.replaceState(null,'','/#bible'); }
+if(qs.get('spotify')){ toast('Spotify conectado!'); history.replaceState(null,'','/#spotify'); }
+go((location.hash||'#home').slice(1) in TITLES ? (location.hash||'#home').slice(1) : 'home');
+// Poucas requisicoes = poucos creditos do Netlify: estado a cada 10 s so com a aba visivel.
+refresh(); loadWeather(); setTimeout(spNow, 800); loadAssist(); setTimeout(loadInfo, 600);
+setInterval(()=>{ if(!document.hidden) loadAssist(); }, 30000); setInterval(()=>{ if(!document.hidden) loadInfo(); }, 600000);
+setInterval(refresh, 10000); setInterval(()=>{ if(!document.hidden && $('spotify').classList.contains('on')) spNow(); }, 20000); setInterval(()=>{ if(!document.hidden) loadWeather(false); }, 1800000);
+document.addEventListener('visibilitychange', ()=>{ if(!document.hidden){ refresh(); loadAssist(); } });
+// timers: contagem regressiva local entre os syncs
+setInterval(()=>{ if(!S) return; (S.timers||[]).forEach(t=>t.left=Math.max(0,t.left-1)); $('tActive').innerHTML=(S.timers||[]).map(t=>`⏲ ${esc(t.label)} — ${Math.floor(t.left/60)}:${String(t.left%60).padStart(2,'0')}`).join('<br>')||'<span class="muted">Nenhum timer ativo</span>'; }, 1000);
+</script>
+</body>
+</html>
