@@ -1,5 +1,11 @@
 # Credenciais e sessoes locais privadas (nao enviar chaves reais ao GitHub)
 secrets_local.h
+firmware/main/secrets_local.h
+firmware/build/
+firmware/managed_components/
+firmware/sdkconfig
+firmware/sdkconfig.old
+firmware/dependencies.lock
 external_server/jarvis_data.json
 
 # Build / Cache

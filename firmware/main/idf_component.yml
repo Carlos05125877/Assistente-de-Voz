@@ -1,0 +1,11 @@
+## Dependencias baixadas automaticamente pelo ESP-IDF (idf.py build)
+dependencies:
+  idf: ">=5.3,<6.0"
+  espressif/arduino-esp32: "~3.3.13"     # Arduino como componente (WiFi, TLS, NVS, OTA); ja traz o esp-sr para o S3
+  espressif/esp-sr: "^2.4.5"             # WakeNet "Jarvis" + AFE (cancelamento de eco, supressao de ruido, VAD)
+  bblanchon/arduinojson:
+    git: https://github.com/bblanchon/ArduinoJson.git
+    version: v6.21.5
+  pschatzmann/arduino-libhelix:
+    git: https://github.com/pschatzmann/arduino-libhelix.git
+    version: f6e55a307c7577c5e3dfe1bf424a61075235fa08   # decoder MP3 (v0.9.4)

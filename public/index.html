@@ -112,9 +112,11 @@
           <div class="small muted" style="margin-top:8px">Sinal WiFi</div><div class="bar"><i id="hRssi"></i></div>
           <div class="row"><span class="small muted">Volume</span><input type="range" min="0" max="100" id="hVol" class="grow"><span id="hVolL" class="mono small">--</span></div>
           <div class="row">
-            <button class="btn" onclick="esp({type:'mic'})">🎙 Ouvir microfone</button>
+            <button class="btn" onclick="esp({type:'mic'})">🎙 Ouvir agora</button>
+            <button class="btn" id="hMute" onclick="esp({type: S?.device?.muted ? 'mic_unmute' : 'mic_mute'})">🔇 Microfone mudo</button>
             <button class="btn" onclick="esp({type:'test',mode:'chime'})">🔔 Testar som</button>
           </div>
+          <div class="hint">Diga <b>“Jarvis”</b> e fale. Botão: toque = falar/interromper · segurar 2 s = microfone mudo.</div>
         </div>
 
         <div class="card">
@@ -441,6 +443,11 @@ som"></textarea>
           <div class="row"><span class="small muted" style="width:120px">Seu nome</span><input class="grow" id="cfg_user_name" placeholder="Como o Jarvis te chama (vazio = senhor)"></div>
           <div class="row"><span class="small muted" style="width:120px">Cidade (clima)</span><input class="grow" id="cfg_city"></div>
           <div class="row"><span class="small muted" style="width:120px">Lat / Lon</span><input class="grow" id="cfg_latitude"><input class="grow" id="cfg_longitude"></div>
+          <div style="margin-top:12px" class="small muted">Voz (ESP32-S3):</div>
+          <label class="toggle"><input type="checkbox" id="cfg_wake_enabled">Ativar dizendo “Jarvis” (sem botão)</label>
+          <label class="toggle"><input type="checkbox" id="cfg_wake_sensitive">Palavra mais sensível (de longe; pode disparar sozinha às vezes · reinicia o ESP)</label>
+          <label class="toggle"><input type="checkbox" id="cfg_barge_in">“Jarvis” interrompe enquanto ele fala</label>
+          <label class="toggle"><input type="checkbox" id="cfg_follow_up">Continuar ouvindo quando o Jarvis faz uma pergunta</label>
           <div style="margin-top:12px" class="small muted">O briefing inclui:</div>
           <label class="toggle"><input type="checkbox" id="cfg_briefing_weather">Clima</label>
           <label class="toggle"><input type="checkbox" id="cfg_briefing_alarms">Próximos alarmes</label>
@@ -606,7 +613,7 @@ function delDevice(i){ const d=[...S.smart_devices]; d.splice(i,1); saveDevices(
 async function smartCtl(i, state){ const d=await post('/api/smart/control',{name:S.smart_devices[i].name, state}); if(d) toast(d.message); }
 
 // ---------- configuracoes
-const CFG=['user_name','city','latitude','longitude','briefing_weather','briefing_alarms','briefing_plan','briefing_plan_full','briefing_verse','briefing_reminders','briefing_dates','briefing_quotes','briefing_news','news_topic'];
+const CFG=['user_name','city','latitude','longitude','wake_enabled','wake_sensitive','barge_in','follow_up','briefing_weather','briefing_alarms','briefing_plan','briefing_plan_full','briefing_verse','briefing_reminders','briefing_dates','briefing_quotes','briefing_news','news_topic'];
 function fillSettings(st){ CFG.forEach(k=>{ const el=$('cfg_'+k); if(!el || document.activeElement===el) return; if(el.type==='checkbox') el.checked=!!st[k]; else el.value=st[k]??''; }); }
 async function saveSettings(){ const b={}; CFG.forEach(k=>{ const el=$('cfg_'+k); b[k]= el.type==='checkbox'? el.checked : el.value; }); const d=await post('/api/settings',b); if(d){ toast('Configurações salvas'); loadWeather(true);} }
 async function testBriefing(){ $('cBrief').style.display='block'; $('cBrief').textContent='Gerando...'; const d=await api('/api/briefing'); if(d) $('cBrief').textContent=d.spoken; }
@@ -633,9 +640,10 @@ function render(){
 
   // ESP32
   $('hEspSeen').textContent = dev.last_seen_ago!=null ? 'visto há '+dev.last_seen_ago+' s' : '';
-  $('hEspKv').innerHTML = dev.ip ? `<span>IP</span><span class="mono">${esc(dev.ip)}</span><span>Uptime</span><span>${fmtUp(dev.uptime)}</span><span>RAM</span><span>${dev.heap??'?'} KB (min ${dev.min_heap??'?'} KB)</span><span>WiFi</span><span>${dev.rssi??'?'} dBm</span><span>Firmware</span><span>${esc(dev.fw||'?')}${dev.busy?' · falando/ouvindo':''}</span>${dev.queue?`<span>Fila</span><span>${dev.queue} comando(s)</span>`:''}`
+  $('hEspKv').innerHTML = dev.ip ? `<span>IP</span><span class="mono">${esc(dev.ip)}</span><span>Uptime</span><span>${fmtUp(dev.uptime)}</span><span>RAM</span><span>${dev.heap??'?'} KB (min ${dev.min_heap??'?'} KB) · PSRAM ${dev.psram??'?'} KB</span><span>Microfone</span><span>${dev.muted?'🔇 mudo':(dev.wake?'👂 ouvindo “Jarvis”':'botão')} · ${dev.wakes||0} ativações</span><span>WiFi</span><span>${dev.rssi??'?'} dBm</span><span>Firmware</span><span>${esc(dev.fw||'?')}${dev.busy?' · falando/ouvindo':''}</span>${dev.queue?`<span>Fila</span><span>${dev.queue} comando(s)</span>`:''}`
                                : '<span>Status</span><span class="muted">Aguardando o ESP32 conectar. Confira NETLIFY_URL e DEVICE_TOKEN no secrets_local.h.</span>';
-  $('hHeap').style.width = Math.min(100, (dev.heap||0)/200*100)+'%';
+  $('hHeap').style.width = Math.min(100, (dev.heap||0)/300*100)+'%';
+  $('hMute').textContent = dev.muted ? '🎙 Ativar microfone' : '🔇 Microfone mudo';
   $('hRssi').style.width = dev.rssi ? Math.max(0, Math.min(100, (dev.rssi+95)/60*100))+'%' : '0';
   if(document.activeElement!==$('hVol') && dev.volume!=null){ $('hVol').value=dev.volume; $('hVolL').textContent=dev.volume+'%'; }
 

@@ -3,12 +3,13 @@
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include "config.h"
-#include "audio_io.h"
+#include "speaker.h"
+#include "listener.h"
 
 // ============================================================================
-// REDE — HTTP/1.1 com keep-alive para o Netlify (uma sessao TLS reaproveitada entre as
-// partes de uma fala longa) e voz -> texto direto no Groq Whisper (upload enquanto fala).
-// Nunca ha duas sessoes TLS abertas ao mesmo tempo (~40 KB cada no ESP32 sem PSRAM).
+// REDE — HTTP/1.1 com keep-alive para o Netlify (a mesma sessao TLS serve todas as partes
+// de uma fala longa e o proximo turno) e voz -> texto direto no Groq Whisper.
+// Com a PSRAM do S3 (buffers do mbedTLS nela), Groq e Netlify podem ficar abertos juntos.
 // ============================================================================
 struct Head {
   int status = 0;
@@ -38,7 +39,7 @@ public:
   /** Envia uma requisicao. Reaproveita a conexao se ela estiver viva. */
   bool request(const char* method, const String& path, const char* ctype = nullptr, const String* body = nullptr) {
     for (int attempt = 0; attempt < 2; ++attempt) {
-      bool reused = c.connected() && millis() - lastUse < 25000;
+      bool reused = c.connected() && millis() - lastUse < 50000;
       if (!reused) {
         c.stop();
         c.setTimeout(20);
@@ -129,11 +130,11 @@ public:
   }
 
   /** Toca o corpo (MP3) da resposta atual. false = interrompido/erro. */
-  bool playBody(AudioIO& audio) {
+  bool playBody(Speaker& audio) {
     uint8_t b[1024];
     int n;
     while ((n = read(b, sizeof(b))) > 0) {
-      if (!audio.push(b, n)) { c.stop(); return false; }
+      if (!audio.push(b, n)) { c.stop(); return false; }   // interrompido: descarta o resto
     }
     if (n < 0) return false;
     finish();
@@ -164,68 +165,103 @@ private:
 };
 
 // ---------------------------------------------------------------------------- Groq Whisper
-// O audio sobe para o Groq ENQUANTO voce fala (chunked); o texto chega ~0,4 s depois do fim.
+// A conexao com o Groq abre no instante da palavra "Jarvis"; a fala limpa (AFE) sobe em chunks
+// ENQUANTO voce fala, e o texto chega ~0,3-0,6 s depois do fim da fala.
 static void putChunk(WiFiClient& c, const uint8_t* d, size_t n) {
   char hdr[10];
   snprintf(hdr, sizeof(hdr), "%X\r\n", (unsigned)n);
   c.print(hdr); c.write(d, n); c.print("\r\n");
 }
 
-/** Retorna o texto reconhecido ("" = nada falado, "#erro" = falha). */
-String transcribeWithGroq(AudioIO& audio, const String& key, const String& model) {
-  if (key.length() < 10) { Serial.println("❌ Chave do Groq ausente (painel > Chaves ou GROQ_API_KEY)"); return "#erro"; }
-  WiFiClientSecure g;
-  g.setInsecure();
-  g.setTimeout(20);
-  if (!g.connect("api.groq.com", 443)) { Serial.println("❌ Groq inacessivel"); return "#erro"; }
-  const char* B = "----JarvisESP32";
-  String head = String("--") + B + "\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\n" + model +
-                "\r\n--" + B + "\r\nContent-Disposition: form-data; name=\"language\"\r\n\r\npt\r\n--" + B +
-                "\r\nContent-Disposition: form-data; name=\"response_format\"\r\n\r\ntext\r\n--" + B +
-                "\r\nContent-Disposition: form-data; name=\"file\"; filename=\"voz.wav\"\r\nContent-Type: audio/wav\r\n\r\n";
-  String tail = String("\r\n--") + B + "--\r\n";
-  g.print(String("POST /openai/v1/audio/transcriptions HTTP/1.1\r\nHost: api.groq.com\r\nAuthorization: Bearer ") + key +
-          "\r\nContent-Type: multipart/form-data; boundary=" + B + "\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n");
-  putChunk(g, (const uint8_t*)head.c_str(), head.length());
-  // cabecalho WAV 16 kHz mono 16-bit (tamanho maximo; o Whisper aceita o arquivo mais curto)
-  const uint32_t dataLen = (uint32_t)MIC_SAMPLE_RATE * MAX_RECORD_SECONDS * 2;
-  uint8_t w[44] = {'R','I','F','F',0,0,0,0,'W','A','V','E','f','m','t',' ',16,0,0,0,1,0,1,0,0,0,0,0,0,0,0,0,2,0,16,0,'d','a','t','a',0,0,0,0};
-  uint32_t riff = dataLen + 36, sr = MIC_SAMPLE_RATE, br = MIC_SAMPLE_RATE * 2;
-  memcpy(w + 4, &riff, 4); memcpy(w + 24, &sr, 4); memcpy(w + 28, &br, 4); memcpy(w + 40, &dataLen, 4);
-  putChunk(g, w, sizeof(w));
-
-  audio.chime();
-  Serial.println("🎙️ Ouvindo...");
-  bool speech = audio.captureChunked(g);
-  putChunk(g, (const uint8_t*)tail.c_str(), tail.length());
-  g.print("0\r\n\r\n");
-  if (!speech) { g.stop(); return ""; }
-  audio.blip();
-
-  String resp;
-  uint32_t t0 = millis();
-  while ((g.connected() || g.available()) && millis() - t0 < 15000) {
-    while (g.available()) { char ch = (char)g.read(); if (resp.length() < 3000) resp += ch; }
-    delay(2);
+class Groq {
+public:
+  void begin() { c.setInsecure(); }
+  /** Abre (ou reaproveita) a conexao. Chame assim que a captura comecar. */
+  bool warm() {
+    if (c.connected() && millis() - lastUse < 40000) return true;
+    c.stop();
+    c.setTimeout(20);
+    bool ok = c.connect("api.groq.com", 443);
+    lastUse = millis();
+    return ok;
   }
-  g.stop();
-  int status = resp.substring(9, 12).toInt();
-  int body = resp.indexOf("\r\n\r\n");
-  String text = body >= 0 ? resp.substring(body + 4) : String();
-  if (resp.indexOf("chunked") > 0 && body >= 0) {          // remove os tamanhos de chunk
-    String out;
-    int i = 0;
-    while (i < (int)text.length()) {
-      int e = text.indexOf("\r\n", i);
-      if (e < 0) break;
-      long n = strtol(text.substring(i, e).c_str(), nullptr, 16);
-      if (n <= 0) break;
-      out += text.substring(e + 2, e + 2 + n);
-      i = e + 2 + n + 2;
+  /** Envia a fala do Listener ao Whisper. "" = nada falado, "#erro" = falha. */
+  String transcribe(Listener& mic, const String& key, const String& model) {
+    if (key.length() < 10) { Serial.println("❌ Chave do Groq ausente (painel > Chaves de API)"); mic.cancelCapture(); return "#erro"; }
+    if (!warm()) { Serial.println("❌ Groq inacessível"); mic.cancelCapture(); return "#erro"; }
+    const char* B = "----JarvisS3";
+    String head = String("--") + B + "\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\n" + model +
+                  "\r\n--" + B + "\r\nContent-Disposition: form-data; name=\"language\"\r\n\r\npt\r\n--" + B +
+                  "\r\nContent-Disposition: form-data; name=\"response_format\"\r\n\r\ntext\r\n--" + B +
+                  "\r\nContent-Disposition: form-data; name=\"file\"; filename=\"voz.wav\"\r\nContent-Type: audio/wav\r\n\r\n";
+    c.print(String("POST /openai/v1/audio/transcriptions HTTP/1.1\r\nHost: api.groq.com\r\nAuthorization: Bearer ") + key +
+            "\r\nContent-Type: multipart/form-data; boundary=" + B + "\r\nTransfer-Encoding: chunked\r\nConnection: keep-alive\r\n\r\n");
+    putChunk(c, (const uint8_t*)head.c_str(), head.length());
+    const uint32_t dataLen = (uint32_t)MIC_SAMPLE_RATE * MAX_RECORD_SECONDS * 2;   // o Whisper aceita arquivo mais curto
+    uint8_t w[44] = {'R','I','F','F',0,0,0,0,'W','A','V','E','f','m','t',' ',16,0,0,0,1,0,1,0,0,0,0,0,0,0,0,0,2,0,16,0,'d','a','t','a',0,0,0,0};
+    uint32_t riff = dataLen + 36, sr = MIC_SAMPLE_RATE, br = MIC_SAMPLE_RATE * 2;
+    memcpy(w + 4, &riff, 4); memcpy(w + 24, &sr, 4); memcpy(w + 28, &br, 4); memcpy(w + 40, &dataLen, 4);
+    putChunk(c, w, sizeof(w));
+    static uint8_t buf[4096];
+    size_t total = 0;
+    bool alive = true;
+    while (alive) {
+      size_t n = mic.read(buf, sizeof(buf), 60);
+      if (n) { putChunk(c, buf, n); total += n; }
+      else if (!mic.capturing()) { while ((n = mic.read(buf, sizeof(buf), 0)) > 0) { putChunk(c, buf, n); total += n; } break; }
+      if (!c.connected()) alive = false;
     }
-    text = out;
+    String tail = String("\r\n--") + B + "--\r\n";
+    putChunk(c, (const uint8_t*)tail.c_str(), tail.length());
+    c.print("0\r\n\r\n");
+    if (!alive) { c.stop(); return "#erro"; }
+    if (!mic.heardSpeech()) { c.stop(); return ""; }          // ninguem falou: nem espera o Groq
+    Serial.printf("⬆️ %u KB de fala enviados\n", (unsigned)(total / 1024));
+    return readResponse();
   }
-  text.trim();
-  if (status != 200) { Serial.printf("❌ Groq HTTP %d: %s\n", status, text.substring(0, 160).c_str()); return "#erro"; }
-  return text;
-}
+
+private:
+  WiFiClientSecure c;
+  uint32_t lastUse = 0;
+  String readResponse() {
+    String resp;
+    long len = -1;
+    bool chunked = false;
+    uint32_t t0 = millis();
+    int status = 0;
+    String line;
+    auto readLine = [&](String& out) -> bool {
+      out = "";
+      while (millis() - t0 < 15000) {
+        while (c.available()) { char ch = (char)c.read(); if (ch == '\n') { out.trim(); return true; } out += ch; }
+        if (!c.connected()) return false;
+        delay(2);
+      }
+      return false;
+    };
+    if (!readLine(line)) { c.stop(); return "#erro"; }
+    status = line.substring(9, 12).toInt();
+    while (readLine(line) && line.length()) {
+      String l = line; l.toLowerCase();
+      if (l.startsWith("content-length:")) len = l.substring(15).toInt();
+      if (l.startsWith("transfer-encoding:") && l.indexOf("chunked") > 0) chunked = true;
+    }
+    if (chunked) {
+      while (readLine(line)) {
+        long n = strtol(line.c_str(), nullptr, 16);
+        if (n <= 0) { readLine(line); break; }
+        while (n > 0 && millis() - t0 < 15000) { if (c.available()) { resp += (char)c.read(); n--; } else delay(1); }
+        readLine(line);
+      }
+    } else {
+      while ((len < 0 || (long)resp.length() < len) && (c.connected() || c.available()) && millis() - t0 < 15000) {
+        if (c.available()) resp += (char)c.read(); else delay(1);
+      }
+      if (len < 0) c.stop();
+    }
+    lastUse = millis();
+    resp.trim();
+    if (status != 200) { Serial.printf("❌ Groq HTTP %d: %s\n", status, resp.substring(0, 160).c_str()); c.stop(); return "#erro"; }
+    return resp;
+  }
+};

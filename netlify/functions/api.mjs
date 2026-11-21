@@ -28,7 +28,9 @@ async function deviceSync(req) {
   const out = { q, hot, next: hot ? 10 : 180, t: Math.floor(Date.now() / 1000) };
   if (+body.st?.cv !== cv) {
     const sec = await getJSON("secrets", {});
-    out.cfg = { v: cv, gk: sec.groq_api_key || process.env.GROQ_API_KEY || "", sm: sec.stt_model || "whisper-large-v3-turbo", rt: await A.routineSchedule() };
+    const s = await loadSettings();
+    out.cfg = { v: cv, gk: sec.groq_api_key || process.env.GROQ_API_KEY || "", sm: sec.stt_model || "whisper-large-v3-turbo", rt: await A.routineSchedule(),
+      we: !!s.wake_enabled, ws: !!s.wake_sensitive, bi: !!s.barge_in, fu: !!s.follow_up };
   }
   return json(out);
 }
@@ -45,7 +47,8 @@ async function state(url) {
     return [k, { set: !!v, value: PLAIN_SECRETS.has(k) ? v : v ? "…" + v.slice(-4) : "" }];
   }));
   return json({
-    device: { online: isOnline(dev), last_seen_ago: ago, ip: st.ip, uptime: st.up, heap: st.heap, min_heap: st.minh, rssi: st.rssi, fw: st.fw, busy: !!st.busy,
+    device: { online: isOnline(dev), last_seen_ago: ago, ip: st.ip, uptime: st.up, heap: st.heap, min_heap: st.minh, psram: st.psram, rssi: st.rssi, fw: st.fw, busy: !!st.busy,
+      wake: !!st.wake, muted: !!st.muted, wakes: st.wakes || 0,
       queue: (dev.queue || []).length, volume: st.vol },
     alarms: alarmsOf(st), timers: timersOf(st).map((t) => ({ ...t, left: Math.max(0, t.left - (ago || 0)) })),
     notes: ((await getJSON("lists", {})).notas || []).filter((i) => !i.done).map((i) => i.text),
@@ -67,6 +70,8 @@ async function espSend(c) {
     case "mic": await queue({ t: "listen" }); break;
     case "test": await queue({ t: "tone", m: c.mode || "chime" }); break;
     case "restart": await queue({ t: "restart" }); break;
+    case "mic_mute": await queue({ t: "mic", on: false }); break;
+    case "mic_unmute": await queue({ t: "mic", on: true }); break;
     case "volume": await queue({ t: "vol", v: Math.max(0, Math.min(100, +c.v || 0)) }); break;
     case "speak": await speak(c.text); break;
     case "say_key": await sayOnDevice((await getJSON(`spoken/${c.key === "preview" ? "preview" : "last"}`, "")) || c.text || "", splitForTts); break;

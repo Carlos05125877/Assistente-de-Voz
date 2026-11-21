@@ -10,7 +10,8 @@ import { alarmsOf, timersOf, remindersOf } from "./device.mjs";
 
 export const DEFAULT_SETTINGS = { user_name: "", voice: "pt-BR-AntonioNeural", rate: "+0%", city: "São Paulo", latitude: "-23.5505", longitude: "-46.6333",
   briefing_weather: true, briefing_alarms: true, briefing_reminders: true, briefing_dates: true, briefing_plan: true, briefing_plan_full: true,
-  briefing_verse: true, briefing_quotes: false, briefing_news: false, news_topic: "" };
+  briefing_verse: true, briefing_quotes: false, briefing_news: false, news_topic: "",
+  wake_enabled: true, wake_sensitive: false, barge_in: true, follow_up: true };
 export const loadSettings = async () => ({ ...DEFAULT_SETTINGS, ...(await getJSON("settings", {})) });
 
 const S = (d) => ({ type: "STRING", description: d }), I = (d) => ({ type: "INTEGER", description: d });
@@ -21,9 +22,9 @@ export const TOOLS = [
     parameters: { type: "OBJECT", required: ["action"], properties: { action: S("read_plan_day, next_plan_day, start_plan, list_plans, sync, verse_of_day, get_passage"), reference: S("Ex: Salmos 23:1-4"), theme: S("Nome ou numero do plano"), plan_day: I("Dia especifico") } } },
   { name: "smart_home", description: "Liga/desliga e ajusta lampadas, fitas LED, tomadas e ar-condicionado (SmartLife/Tuya).",
     parameters: { type: "OBJECT", required: ["device_name", "state"], properties: { device_name: S("Nome do dispositivo"), state: S("on ou off"), brightness: I("1 a 100"), color: S("Cor em portugues") } } },
-  { name: "jarvis_system", description: "Alarmes despertadores, timers, notas rapidas, clima, volume dos alto-falantes, status e briefing do dia.",
+  { name: "jarvis_system", description: "Alarmes despertadores, timers, notas rapidas, clima, volume dos alto-falantes, desligar o microfone (privacidade), status e briefing do dia.",
     parameters: { type: "OBJECT", required: ["action"], properties: {
-      action: S("set_alarm, list_alarms, remove_alarm, clear_alarms, set_timer, list_timers, cancel_timers, add_note, get_notes, clear_notes, get_weather, set_speaker_volume, system_status, morning_briefing"),
+      action: S("set_alarm, list_alarms, remove_alarm, clear_alarms, set_timer, list_timers, cancel_timers, add_note, get_notes, clear_notes, get_weather, set_speaker_volume, mute_microphone, system_status, morning_briefing"),
       alarm_hour: I("0-23"), alarm_minute: I("0-59"), alarm_repeat_daily: { type: "BOOLEAN", description: "Todo dia" }, timer_seconds: I("Duracao"), label: S("Rotulo ou texto da nota"), volume: I("0 a 100") } } },
   { name: "assistant_tools", description: "Lembretes com data/hora, listas (compras, tarefas...), noticias, cotacoes, Wikipedia, rotinas e aniversarios/datas especiais.",
     parameters: { type: "OBJECT", required: ["action"], properties: {
@@ -89,7 +90,8 @@ export async function execTool(name, a = {}, ctx = {}) {
       case "clear_notes": return R((await A.listClear("notas")).spoken);
       case "get_weather": return R(await weatherSpoken());
       case "set_speaker_volume": { const v = Math.max(0, Math.min(100, +a.volume || 70)); return R(`Volume em ${v} por cento.`, [{ t: "vol", v }]); }
-      case "system_status": return R(`Memória livre ${st.heap ?? "?"} kilobytes, WiFi ${st.rssi ?? "?"} dBm, ligado há ${Math.floor((st.up || 0) / 60)} minutos. ${alarmsSpoken(st)}`);
+      case "mute_microphone": return R("Microfone desligado. Para religar, segure o botão por 2 segundos ou use o painel.", [{ t: "mic", on: false }]);
+      case "system_status": return R(`Memória livre ${st.heap ?? "?"} kilobytes mais ${Math.round((st.psram || 0) / 1024)} megabytes de PSRAM, WiFi ${st.rssi ?? "?"} dBm, ligado há ${Math.floor((st.up || 0) / 60)} minutos. ${alarmsSpoken(st)}`);
       case "morning_briefing": return R(await briefing(st));
     }
   }

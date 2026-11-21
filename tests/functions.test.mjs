@@ -67,6 +67,7 @@ test("sync entrega config 1x, fila de comandos e modo rapido com painel aberto",
   await api(req("/api/secrets", { method: "POST", headers: { cookie, "Content-Type": "application/json" }, body: { groq_api_key: "gsk_abc", gemini_api_key: "g1" } }));
   let r = await (await api(req("/api/sync", { method: "POST", headers: DEV, body: { st: { heap: 120, al: [] } } }))).json();
   assert.equal(r.cfg.gk, "gsk_abc");
+  assert.deepEqual([r.cfg.we, r.cfg.ws, r.cfg.bi, r.cfg.fu], [true, false, true, true]); // "Jarvis" ligado por padrao
   assert.equal(r.hot, true); // o painel acabou de abrir /api/state
   assert.equal(r.next, 10);
   await api(req("/api/esp/send", { method: "POST", headers: { cookie, "Content-Type": "application/json" }, body: { type: "alarm_add", h: 7, m: 30, label: "Devocional" } }));
@@ -165,4 +166,16 @@ test("briefing disparado pelo alarme devocional usa o estado do ESP32", async ()
   const b = await (await api(req("/api/briefing", { headers: { cookie } }))).json();
   assert.match(b.spoken, /Carlos\. Hoje é .*Temperatura|Carlos\. Hoje é/);
   assert.match(b.spoken, /Próximos alarmes: 23 horas e 59, Dormir/);
+});
+
+test("voz: 'Jarvis, desliga o microfone' vira acao mic off; painel religa", async () => {
+  geminiReply = fnCall("jarvis_system", { action: "mute_microphone" });
+  const r = await voice(req("/api/turn", { method: "POST", headers: DEV, body: { text: "desliga o microfone" } }));
+  assert.deepEqual(JSON.parse(Buffer.from(r.headers.get("x-actions"), "base64url").toString()), [{ t: "mic", on: false }]);
+  await api(req("/api/esp/send", { method: "POST", headers: { cookie, "Content-Type": "application/json" }, body: { type: "mic_unmute" } }));
+  const s = await (await api(req("/api/sync", { method: "POST", headers: DEV, body: { st: { cv: 1, muted: true, psram: 7000 } } }))).json();
+  assert.deepEqual(s.q, [{ t: "mic", on: true }]);
+  const st = await (await api(req("/api/state", { headers: { cookie } }))).json();
+  assert.equal(st.device.muted, true);
+  assert.equal(st.device.psram, 7000);
 });
