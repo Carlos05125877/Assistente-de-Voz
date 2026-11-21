@@ -146,14 +146,14 @@ public:
     {
       JsonObject fn = fnDecls.createNestedObject();
       fn["name"] = "bible_app";
-      fn["description"] = "Conecta com o App da Biblia Oficial (Holy Bible / YouVersion - bible.com/pt/reading-plans): le o Devocional e Plano de Leitura do dia atual, avanca para o proximo dia do plano, inicia planos de leitura por tema (ansiedade, paz, sabedoria, esperanca, gratidao) ou ID do bible.com, lista planos, le o Versiculo do Dia oficial ou qualquer passagem biblica.";
+      fn["description"] = "Conecta com a CONTA PESSOAL do usuario no App da Biblia (YouVersion / bible.com): le o devocional e as passagens do dia atual do plano de leitura em que ele parou (\"leia meu plano de hoje\"), avanca para o proximo dia, troca para outro plano da conta (por nome ou numero da lista), lista os planos em andamento, sincroniza a conta, le o Versiculo do Dia ou qualquer passagem biblica.";
       JsonObject params = fn.createNestedObject("parameters");
       params["type"] = "OBJECT";
       JsonObject props = params.createNestedObject("properties");
 
       JsonObject pAct = props.createNestedObject("action");
       pAct["type"] = "STRING";
-      pAct["description"] = "Acao: read_plan_day (le o devocional e escritura de hoje do plano ativo), next_plan_day (conclui o dia atual e avanca p/ o proximo dia do plano), start_plan (inicia um plano de leitura do YouVersion por tema ou nome), list_plans (lista planos de bible.com/pt/reading-plans), verse_of_day (Versiculo do Dia oficial do YouVersion), get_passage (le um livro/capitulo/versiculo especifico)";
+      pAct["description"] = "Acao: read_plan_day (le o devocional e as passagens de hoje do plano ativo da conta), next_plan_day (conclui o dia atual e le o proximo dia), start_plan (ativa outro plano da conta pelo nome ou numero da lista, ou um tema), list_plans (lista os planos em andamento da conta YouVersion), sync (sincroniza os planos da conta com o app), verse_of_day (Versiculo do Dia oficial), get_passage (le um livro/capitulo/versiculo especifico)";
 
       JsonObject pRef = props.createNestedObject("reference");
       pRef["type"] = "STRING";
@@ -161,7 +161,7 @@ public:
 
       JsonObject pThm = props.createNestedObject("theme");
       pThm["type"] = "STRING";
-      pThm["description"] = "Tema ou nome/slug do Plano de Leitura em bible.com/pt/reading-plans quando action=start_plan (ex: ansiedade, paz, sabedoria, proverbios, esperanca, fe, gratidao)";
+      pThm["description"] = "Quando action=start_plan: nome (ou parte do nome) de um plano da conta do usuario, o numero dele na lista (ex: 2) ou um tema (ex: ansiedade, sabedoria, esperanca, gratidao)";
 
       JsonObject pDay = props.createNestedObject("plan_day");
       pDay["type"] = "INTEGER";

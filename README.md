@@ -101,3 +101,22 @@ O ESP32 funciona 100% sozinho, mas se quiser aliviar o microcontrolador e facili
   - *"Jarvis, acende a luz da sala"* / *"Coloca a fita LED em azul"*
   - *"Jarvis, como está o clima agora?"*
   - *"Jarvis, relatório completo de status do sistema"*
+
+---
+
+## 🔐 Conta pessoal do YouVersion (planos de leitura da sua conta)
+
+O `external_server/jarvis_bridge_server.py` conecta na **sua conta** do App Bíblia e sincroniza os planos em andamento e o dia em que você parou.
+
+1. Rode `python external_server/jarvis_bridge_server.py` e abra `http://127.0.0.1:8080`.
+2. Em **"Sua Conta Pessoal no App Bíblia"**, entre com e-mail/usuário e senha do YouVersion.
+   - O servidor tenta primeiro o **OAuth2 da API do app** (`auth.youversionapi.com/token`), que não depende dos IDs de Server Action do `login.youversion.com` (eles mudam a cada deploy do site). Se falhar, tenta o **login web** (`login.youversion.com` → `bible.com/api/authenticate`), guardando **todos** os cookies do bible.com.
+   - Conta criada com **Google/Apple**? Abra o painel “login social” e cole o valor do cookie `yva` (token Bearer) ou a linha inteira de cookies do `www.bible.com`.
+3. Os planos aparecem em **"📚 Planos de Leitura Sincronizados"**. Clique em **Ativar no Jarvis** em qualquer um. O sync roda de novo sozinho a cada 6 h (para pegar o que você leu no celular) ou quando você clica em **🔄 Sincronizar** ou diz *"Jarvis, sincroniza meus planos"*.
+4. Se a lista ficar vazia, abra **`http://127.0.0.1:8080/youversion/debug`**. Ele mostra o que cada etapa respondeu (status HTTP e estrutura do JSON, **sem tokens, sem e-mail e sem senha**).
+
+**Leitura por voz sem truncar:** o servidor monta o texto completo do dia (devocional + todas as passagens, pela API `reading-plans`/`bible` do YouVersion) e devolve ao ESP32 só um resumo (< 2 KB). O áudio completo é tocado via `GET /api/tts?key=last`, que sintetiza o Edge-TTS **em blocos** e envia PCM 16 kHz em streaming: a voz começa depois do 1º bloco e o texto nunca passa inteiro pela RAM do ESP-WROOM-32. Aperte o botão BOOT/GPIO 4 para interromper.
+
+Exemplos: *"Jarvis, leia meu plano da Bíblia de hoje"*, *"Jarvis, avance para o próximo dia do meu plano"*, *"Jarvis, liste meus planos"*, *"Jarvis, ative o plano 2"*.
+
+> ⚠️ As APIs `*.youversionapi.com` usadas aqui **não são oficiais** (são as mesmas que o app usa). Podem mudar sem aviso, e o uso automatizado pode contrariar os termos do YouVersion. Use só na sua própria conta.

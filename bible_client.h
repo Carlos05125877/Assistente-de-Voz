@@ -6,6 +6,7 @@
 #include <ArduinoJson.h>
 #include <Preferences.h>
 #include "config_private.h"
+#include "audio_manager.h"   // g_bridgeTtsKey: audio completo do devocional vem do Bridge
 
 // ============================================================================
 // CLIENTE OFICIAL APP DA BIBLIA — YOUVERSION / HOLY BIBLE (bible.com/pt)
@@ -203,6 +204,8 @@ public:
   int activePlanDay   = 1;      // Dia atual do plano (1..N)
   String bibleVersion = "NVI";  // NVI (129), ARC (211), NVT (193)
   String customPlanSlug = "";   // Caso o usuario informe um ID/URL de bible.com/pt/reading-plans/...
+  String bridgePlanTitle = "";  // Plano ativo da SUA CONTA YouVersion (sincronizado pelo Bridge Server)
+  int    bridgeTotalDays = 0;
 
   String lastReference = "Filipenses 4:6-7 (NVI)";
   String lastVerseText = "Da Ansiedade a Paz (Dia 1): Nao andem ansiosos por coisa alguma, mas em tudo, pela oracao e suplicas, apresentem seus pedidos a Deus.";
@@ -216,6 +219,8 @@ public:
     activePlanDay = biblePrefs.getInt("plan_day", 1);
     bibleVersion  = biblePrefs.getString("version", "NVI");
     customPlanSlug = biblePrefs.getString("custom_slug", "");
+    bridgePlanTitle = biblePrefs.getString("yv_title", "");
+    bridgeTotalDays = biblePrefs.getInt("yv_total", 0);
 
     if (customPlanSlug.length() > 0) {
       int idx = customPlanSlug.indexOf("/reading-plans/");
@@ -254,9 +259,15 @@ public:
     biblePrefs.putInt("plan_day", activePlanDay);
     biblePrefs.putString("version", bibleVersion);
     biblePrefs.putString("custom_slug", customPlanSlug);
+    biblePrefs.putString("yv_title", bridgePlanTitle);
+    biblePrefs.putInt("yv_total", bridgeTotalDays);
   }
 
   String getActivePlanStatus() {
+    if (bridgePlanTitle.length() > 0) {
+      return bridgePlanTitle + " (conta YouVersion) - Dia " + String(activePlanDay) +
+             (bridgeTotalDays > 0 ? " de " + String(bridgeTotalDays) : String(""));
+    }
     if (customPlanSlug.length() > 0) {
       return "Plano Bible.com (" + customPlanSlug + ") - Dia " + String(activePlanDay);
     }
@@ -374,45 +385,77 @@ public:
     return outDescription.length() > 10;
   }
   // 1. Tenta consultar via Servidor Externo Jarvis Bridge (/api/bible/youversion)
+  //    - client=esp32: o Bridge responde em formato compacto (< 2 KB), entao nunca estoura a RAM;
+  //    - o texto COMPLETO (devocional + passagens) fica no servidor e e falado via
+  //      /api/tts?key=last (streaming PCM em blocos), sem truncar e sem passar pela RAM do ESP32;
+  //    - day=0 significa "use o dia sincronizado da sua conta" (o servidor e a fonte da verdade).
   bool callExternalYouVersionBridge(const String& action, const String& planOrTopic,
                                     int day, const String& ref, String& outSpoken) {
     if (strlen(EXTERNAL_SERVER_URL) <= 8) return false;
 
     HTTPClient http;
-    String url = String(EXTERNAL_SERVER_URL) + "/api/bible/youversion?action=" + urlEncode(action) +
+    WiFiClient tcp;
+    String url = String(EXTERNAL_SERVER_URL) + "/api/bible/youversion?client=esp32&action=" + urlEncode(action) +
                  "&plan=" + urlEncode(planOrTopic) +
                  "&day=" + String(day) +
                  "&ref=" + urlEncode(ref) +
                  "&version=" + urlEncode(bibleVersion);
 
-    if (!http.begin(url)) return false;
-    http.setTimeout(8000);
+    if (!http.begin(tcp, url)) return false;
+    http.setTimeout(30000);          // sync da conta + download das passagens pode levar alguns segundos
+    http.setConnectTimeout(3000);
     int code = http.GET();
     if (code != 200) {
+      Serial.printf("⚠️ [YouVersion Bridge] HTTP %d em %s\n", code, action.c_str());
       http.end();
       return false;
     }
 
-    String resp = http.getString();
-    http.end();
+    StaticJsonDocument<192> filter;
+    filter["spoken"] = true;
+    filter["reference"] = true;
+    filter["day"] = true;
+    filter["total_days"] = true;
+    filter["plan_title"] = true;
+    filter["tts_key"] = true;
 
     DynamicJsonDocument doc(3072);
-    if (deserializeJson(doc, resp)) return false;
+    DeserializationError err = deserializeJson(doc, http.getStream(), DeserializationOption::Filter(filter));
+    http.end();
+    if (err) {
+      Serial.printf("⚠️ [YouVersion Bridge] JSON invalido: %s\n", err.c_str());
+      return false;
+    }
 
     String spoken = doc["spoken"] | "";
     String rRef   = doc["reference"] | "";
-    String rTxt   = doc["text"] | "";
-    int rDay      = doc["day"] | activePlanDay;
+    String rTitle = doc["plan_title"] | "";
+    String ttsKey = doc["tts_key"] | "";
+    int rDay      = doc["day"] | 0;
+    int rTotal    = doc["total_days"] | 0;
 
-    if (spoken.length() > 0) {
-      activePlanDay = rDay;
-      saveProgressToNVS();
-      if (rRef.length() > 0) lastReference = rRef;
-      if (rTxt.length() > 0) lastVerseText = rTxt;
-      outSpoken = spoken;
-      return true;
+    spoken.replace("*", "");          // mesma limpeza que o GeminiAgent faz antes do TTS
+    spoken.replace("#", "");
+    spoken.replace("`", "");
+    spoken.trim();
+    if (spoken.length() == 0) return false;
+
+    if (rDay > 0) activePlanDay = rDay;
+    if (rTitle.length() > 0) {
+      bridgePlanTitle = rTitle;
+      bridgeTotalDays = rTotal;
     }
-    return false;
+    saveProgressToNVS();
+    if (rRef.length() > 0) lastReference = rRef;
+    lastVerseText = spoken;
+
+    // Pede ao AudioManager para tocar o audio COMPLETO guardado no Bridge
+    if (ttsKey.length() > 0) {
+      g_bridgeTtsKey = ttsKey;
+      g_bridgeTtsPrefix = spoken.substring(0, 48);
+    }
+    outSpoken = spoken;
+    return true;
   }
 
   // 2. Busca o Versiculo do Dia diretamente de https://www.bible.com/pt/verse-of-the-day
@@ -443,7 +486,8 @@ public:
     if (requestedDay > 0) activePlanDay = requestedDay;
 
     String bridgeOut;
-    if (callExternalYouVersionBridge("read_plan_day", customPlanSlug, activePlanDay, "", bridgeOut)) {
+    // Envia apenas o dia pedido explicitamente; 0 = dia sincronizado da sua conta no servidor
+    if (callExternalYouVersionBridge("read_plan_day", "", requestedDay, "", bridgeOut)) {
       return bridgeOut;
     }
 
@@ -499,13 +543,12 @@ public:
     q.trim();
 
     String bridgeOut;
-    if (callExternalYouVersionBridge("start_plan", topicOrPlanName, 1, "", bridgeOut)) {
+    if (callExternalYouVersionBridge("start_plan", topicOrPlanName, 0, "", bridgeOut)) {
       // Atualiza indice local tambem
       for (size_t i = 0; i < YOUVERSION_PLAN_COUNT; ++i) {
         if (q.indexOf(YOUVERSION_READING_PLANS[i].planKey) >= 0 ||
             String(YOUVERSION_READING_PLANS[i].topics).indexOf(q) >= 0) {
           activePlanIndex = (int)i;
-          activePlanDay = 1;
           customPlanSlug = "";
           saveProgressToNVS();
           break;
@@ -513,6 +556,10 @@ public:
       }
       return bridgeOut;
     }
+
+    // Bridge offline: volta para os planos locais embarcados
+    bridgePlanTitle = "";
+    bridgeTotalDays = 0;
 
     // Procura nos planos YouVersion por tema ou titulo
     for (size_t i = 0; i < YOUVERSION_PLAN_COUNT; ++i) {
@@ -630,6 +677,12 @@ public:
   // Dispatcher unificado para o Gemini Function Calling e Painel Web HUD
   String executeCommand(WiFiClientSecure& cli, const String& action,
                         const String& reference, const String& planOrTheme, int day = 0) {
+    g_bridgeTtsKey = "";   // descarta audio pendente de um comando anterior
+    if (action == "sync" || action == "sync_account") {
+      String out;
+      if (callExternalYouVersionBridge("sync", "", 0, "", out)) return out;
+      return "Nao consegui falar com o servidor Jarvis para sincronizar sua conta do YouVersion.";
+    }
     if (action == "read_plan_day" || action == "daily_devotional") {
       return readCurrentPlanDay(cli, day);
     }
