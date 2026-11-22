@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 640" font-family="Segoe UI, Roboto, Arial, sans-serif">
+  <rect width="1000" height="640" fill="#0b1220"/>
+  <text x="500" y="38" fill="#e3eefc" font-size="22" font-weight="700" text-anchor="middle">Ligações — J.A.R.V.I.S. (ESP32-S3 N16R8)</text>
+
+  <!-- ESP32-S3 -->
+  <rect x="390" y="90" width="220" height="470" rx="14" fill="#13233a" stroke="#34e4ff" stroke-width="2"/>
+  <text x="500" y="122" fill="#34e4ff" font-size="20" font-weight="700" text-anchor="middle">ESP32-S3</text>
+  <text x="500" y="142" fill="#8aa3c2" font-size="13" text-anchor="middle">DevKitC-1 N16R8</text>
+  <g fill="#e3eefc" font-size="14" font-family="Consolas, monospace">
+    <text x="400" y="190">3V3</text><text x="400" y="220">GND</text>
+    <text x="400" y="250">GPIO 4</text><text x="400" y="280">GPIO 5</text><text x="400" y="310">GPIO 6</text>
+    <text x="600" y="190" text-anchor="end">5V</text><text x="600" y="220" text-anchor="end">GND</text>
+    <text x="600" y="250" text-anchor="end">GPIO 15</text><text x="600" y="280" text-anchor="end">GPIO 16</text><text x="600" y="310" text-anchor="end">GPIO 7</text>
+    <text x="400" y="400">GPIO 21</text><text x="400" y="430">GND</text>
+    <text x="500" y="520" fill="#8aa3c2" font-size="13" text-anchor="middle">BOOT (GPIO 0) também fala</text>
+    <text x="500" y="540" fill="#8aa3c2" font-size="13" text-anchor="middle">LED RGB: GPIO 48 (ou 38)</text>
+  </g>
+
+  <!-- INMP441 -->
+  <rect x="40" y="160" width="220" height="190" rx="12" fill="#13233a" stroke="#3ddc97" stroke-width="2"/>
+  <text x="150" y="188" fill="#3ddc97" font-size="18" font-weight="700" text-anchor="middle">Microfone INMP441</text>
+  <g fill="#e3eefc" font-size="14" font-family="Consolas, monospace">
+    <text x="250" y="220" text-anchor="end">VDD</text><text x="250" y="250" text-anchor="end">GND</text>
+    <text x="250" y="280" text-anchor="end">SCK</text><text x="250" y="310" text-anchor="end">WS</text>
+    <text x="250" y="340" text-anchor="end">SD</text>
+    <text x="55" y="250" fill="#ffc46b">L/R → GND</text>
+  </g>
+  <g stroke="#3ddc97" stroke-width="2.5" fill="none">
+    <path d="M255 215 H330 V185 H395"/><path d="M255 245 H340 V215 H395"/>
+    <path d="M255 275 H350 V245 H395"/><path d="M255 305 H360 V275 H395"/><path d="M255 335 H370 V305 H395"/>
+  </g>
+
+  <!-- MAX98357A x2 -->
+  <rect x="740" y="110" width="220" height="170" rx="12" fill="#13233a" stroke="#ffc46b" stroke-width="2"/>
+  <text x="850" y="136" fill="#ffc46b" font-size="15" font-weight="700" text-anchor="middle">MAX98357A — ESQUERDO</text>
+  <rect x="740" y="330" width="220" height="190" rx="12" fill="#13233a" stroke="#ffc46b" stroke-width="2"/>
+  <text x="850" y="356" fill="#ffc46b" font-size="15" font-weight="700" text-anchor="middle">MAX98357A — DIREITO</text>
+  <g fill="#e3eefc" font-size="14" font-family="Consolas, monospace">
+    <text x="750" y="170">VIN</text><text x="750" y="196">GND</text><text x="750" y="222">BCLK</text><text x="750" y="248">LRC</text><text x="750" y="274">DIN</text>
+    <text x="880" y="170" fill="#ffc46b">SD → VIN</text>
+    <text x="750" y="390">VIN</text><text x="750" y="416">GND</text><text x="750" y="442">BCLK</text><text x="750" y="468">LRC</text><text x="750" y="494">DIN</text>
+    <text x="830" y="390" fill="#ffc46b">SD →470kΩ→ VIN</text>
+  </g>
+  <g stroke="#ffc46b" stroke-width="2.5" fill="none">
+    <path d="M605 185 H680 V165 H745"/><path d="M605 215 H690 V191 H745"/>
+    <path d="M605 245 H700 V217 H745"/><path d="M605 275 H710 V243 H745"/><path d="M605 305 H720 V269 H745"/>
+    <path d="M680 165 V385 H745"/><path d="M690 191 V411 H745"/><path d="M700 217 V437 H745"/><path d="M710 243 V463 H745"/><path d="M720 269 V489 H745"/>
+  </g>
+  <text x="850" y="545" fill="#8aa3c2" font-size="13" text-anchor="middle">cada um com 1 alto-falante 4–8 Ω, até 3 W</text>
+
+  <!-- Botao -->
+  <rect x="80" y="390" width="160" height="70" rx="12" fill="#13233a" stroke="#ff5d73" stroke-width="2"/>
+  <text x="160" y="420" fill="#ff5d73" font-size="17" font-weight="700" text-anchor="middle">Botão</text>
+  <text x="160" y="444" fill="#8aa3c2" font-size="13" text-anchor="middle">push-button</text>
+  <g stroke="#ff5d73" stroke-width="2.5" fill="none"><path d="M240 410 H395"/><path d="M240 440 H395"/></g>
+
+  <text x="500" y="610" fill="#8aa3c2" font-size="13" text-anchor="middle">Os dois amplificadores dividem os mesmos fios BCLK / LRC / DIN. O pino SD define o canal de cada um.</text>
+</svg>
