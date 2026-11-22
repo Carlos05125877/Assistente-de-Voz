@@ -47,9 +47,23 @@ public:
 
     // ---- AFE: "MR" = 1 microfone + referencia do alto-falante (AEC)
     srmodel_list_t* models = esp_srmodel_init("model");
-    if (!models) { Serial.println("❌ Modelos do ESP-SR ausentes (rode 'idf.py flash' para gravar a particao 'model')"); return false; }
-    afe_config_t* cfg = afe_config_init("MR", models, AFE_TYPE_SR, AFE_MODE_LOW_COST);
+    if (!models) { Serial.println("❌ Modelos do ESP-SR ausentes: use o Partition Scheme \"ESP SR 16M\" (veja o README)"); return false; }
+    // "Jarvis" se o modelo estiver gravado (srmodels_jarvis.bin); senao a palavra padrao ("Hi ESP")
     char* wn = esp_srmodel_filter(models, ESP_WN_PREFIX, "jarvis");
+    data = createAfe(models, wn, sensitive);
+    if (!data && wn) { Serial.println("⚠️ Modelo Jarvis incompatível; usando a palavra padrão"); data = createAfe(models, nullptr, sensitive); }
+    if (!data) { Serial.println("❌ Falha ao iniciar o AFE"); return false; }
+
+    capture = makeStream(CAPTURE_RING_BYTES, 1, true);
+    xTaskCreatePinnedToCore(feedTask, "afe_feed", 6144, this, 5, nullptr, 0);
+    xTaskCreatePinnedToCore(fetchTask, "afe_fetch", 6144, this, 5, nullptr, 1);
+    ready = true;
+    return true;
+  }
+
+  esp_afe_sr_data_t* createAfe(srmodel_list_t* models, char* wn, bool sensitive) {
+    afe_config_t* cfg = afe_config_init("MR", models, AFE_TYPE_SR, AFE_MODE_LOW_COST);
+    if (!cfg) return nullptr;
     if (wn) cfg->wakenet_model_name = wn;
     cfg->aec_init = true;
     cfg->ns_init = true;
@@ -61,15 +75,9 @@ public:
     cfg->memory_alloc_mode = AFE_MEMORY_ALLOC_MORE_PSRAM;
     Serial.printf("🎙️ Palavra de ativação: %s (%s)\n", cfg->wakenet_model_name ? cfg->wakenet_model_name : "?", sensitive ? "sensível" : "normal");
     afe = esp_afe_handle_from_config(cfg);
-    data = afe->create_from_config(cfg);
+    esp_afe_sr_data_t* d = afe ? afe->create_from_config(cfg) : nullptr;
     afe_config_free(cfg);
-    if (!data) { Serial.println("❌ Falha ao iniciar o AFE"); return false; }
-
-    capture = makeStream(CAPTURE_RING_BYTES, 1, true);
-    xTaskCreatePinnedToCore(feedTask, "afe_feed", 6144, this, 5, nullptr, 0);
-    xTaskCreatePinnedToCore(fetchTask, "afe_fetch", 6144, this, 5, nullptr, 1);
-    ready = true;
-    return true;
+    return d;
   }
 
   bool isReady() const { return ready; }

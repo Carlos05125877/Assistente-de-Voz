@@ -74,38 +74,57 @@ Cores do LED:
 >
 > Nossa *estimativa* para uso pessoal fica em uns 60 a 120 créditos por mês (sync de 3 em 3 min, painel aberto 1 h por dia, ~30 conversas por dia e o devocional diário), contando 2 deploys. **Evite deploys frequentes**: faça vários commits e publique de uma vez (ou desligue o auto-deploy e publique manualmente). O consumo aparece em *Usage & billing*.
 
-## 3. Firmware do ESP32-S3 (ESP-IDF)
-O firmware usa o **ESP-IDF 5.x** com o Arduino como componente. O ESP-IDF é necessário para gravar o modelo da palavra “Jarvis” na partição `model`. Por isso a Arduino IDE não serve mais. As dependências são baixadas sozinhas no primeiro build:
-- arduino-esp32
-- esp-sr
-- ArduinoJson
-- arduino-libhelix
+## 3. Firmware do ESP32-S3 (Arduino IDE)
+O sketch fica em **`firmware/jarvis_s3/jarvis_s3.ino`**. Abra esse arquivo; os `.h` da mesma pasta abrem junto, em abas.
 
-1. Instale o ESP-IDF 5.4 ou mais novo. O jeito mais fácil é a extensão **ESP-IDF** do VS Code.
-2. Configure as credenciais:
-   ```bash
-   cd firmware
-   cp main/secrets_local.example.h main/secrets_local.h   # WiFi, NETLIFY_URL, DEVICE_TOKEN, OTA_PASSWORD
-   ```
-3. Compile e grave pelo USB. O `flash` grava o app **e** o modelo do WakeNet:
-   ```bash
-   idf.py set-target esp32s3
-   idf.py build
-   idf.py -p COM5 flash monitor        # no Linux/Mac: -p /dev/ttyACM0
-   ```
-4. No monitor deve aparecer `Palavra de ativação: wn9_jarvis_tts`. Se aparecer outra palavra, abra `idf.py menuconfig`, vá em *ESP Speech Recognition → Load Multiple Wake Words*, marque **Jarvis**, desmarque as outras e grave de novo.
-5. Para as próximas atualizações, use o WiFi (o modelo não muda):
-   ```bash
-   python tools/espota.py -i jarvis.local -a SUA_SENHA_OTA -f build/jarvis.bin
-   ```
+**1. Instale o suporte ao ESP32 e as bibliotecas**
+- *Gerenciador de Placas*: instale **esp32** da Espressif, versão 3.3 ou mais nova.
+- *Gerenciador de Bibliotecas*: instale **ArduinoJson**, versão **6.21.5**. A 7.x também compila, mas com avisos.
+- **arduino-libhelix**, o decodificador de MP3:
+  1. Baixe o ZIP em https://github.com/pschatzmann/arduino-libhelix (*Code → Download ZIP*).
+  2. Na IDE, use *Sketch → Incluir Biblioteca → Adicionar biblioteca .ZIP*.
 
-Ajustes úteis em `firmware/main/config.h`:
-- `MIC_SHIFT_BITS`: ganho do microfone. Diminua se o Whisper não te ouvir; aumente se o áudio sair distorcido.
-- `END_SILENCE_MS`: quanto silêncio encerra a fala.
+**2. Credenciais:** copie `secrets_local.example.h` para `secrets_local.h`, na mesma pasta, e preencha WiFi, `NETLIFY_URL`, `DEVICE_TOKEN` e `OTA_PASSWORD`.
 
-**Memória:** o modelo do WakeNet e o AFE, o buffer de MP3 (256 KB), a gravação da fala (14 s) e os buffers TLS ficam na PSRAM de 8 MB. A RAM interna sobra para o WiFi e o áudio em tempo real. O painel mostra a RAM e a PSRAM livres.
+**3. Menu Ferramentas** (placa **ESP32S3 Dev Module**):
 
-**Sync:** a cada 3 min o ESP32 manda seu estado e recebe os comandos e configurações do painel. Com o painel aberto, a cada 10 s. Qualquer mudança local sincroniza em ~3 s.
+| Opção | Valor |
+|---|---|
+| USB CDC On Boot | Enabled |
+| Flash Size | 16MB (128Mb) |
+| PSRAM | **OPI PSRAM** |
+| Partition Scheme | **ESP SR 16M (3MB APP/6MB SPIFFS/3.9MB MODEL)** |
+| Upload Speed | 921600 |
+
+**4. Palavra “Jarvis”.** A Arduino IDE grava, junto com o sketch, o arquivo de modelos de voz que vem com a placa. Esse arquivo só tem a palavra **“Hi ESP”**. Para trocar por **“Jarvis”** (é só uma vez):
+1. Feche a Arduino IDE.
+2. Ache o arquivo original:
+   - **Windows:** `%LOCALAPPDATA%\Arduino15\packages\esp32\tools\esp32-arduino-libs\<versão>\esp32s3\esp_sr\srmodels.bin`
+   - **Linux/Mac:** `~/.arduino15/packages/esp32/tools/esp32-arduino-libs/<versão>/esp32s3/esp_sr/srmodels.bin` (no Mac é `~/Library/Arduino15/...`)
+3. Renomeie o original para `srmodels.bin.original`.
+4. Copie `firmware/srmodels_jarvis.bin` deste repositório para essa pasta com o nome `srmodels.bin`.
+
+O arquivo traz os modelos “Jarvis” e “Hi ESP”. Se o modelo Jarvis não funcionar na sua versão da placa, o firmware cai sozinho para “Hi ESP” e avisa no monitor serial. O botão funciona em qualquer caso.
+
+**5. Grave:** clique em *Carregar* e abra o monitor serial em 115200. Deve aparecer `Palavra de ativação: wn9_jarvis_tts`.
+
+Ajustes úteis em `config.h`:
+- **Pinos**
+- **`MIC_SHIFT_BITS`:** ganho do microfone. Diminua se o Whisper não te ouvir; aumente se o áudio sair distorcido.
+- **`END_SILENCE_MS`:** quanto silêncio encerra a fala.
+
+**Atualizar pelo WiFi:** depois da primeira gravação por cabo, a placa `jarvis` aparece em *Ferramentas → Porta* como porta de rede. A senha é a `OTA_PASSWORD`.
+
+> **Opcional, ESP-IDF:** `firmware/idf/` compila o mesmo código pelo ESP-IDF, já com o “Jarvis” configurado:
+> ```bash
+> cd firmware/idf
+> idf.py set-target esp32s3
+> idf.py build flash monitor
+> ```
+
+**Memória:** o modelo de voz e o processamento de áudio, o buffer de MP3 (256 KB), a gravação da fala (14 s) e as conexões seguras ficam na PSRAM de 8 MB.
+
+**Sync:** a cada 3 min o ESP32 manda seu estado e recebe os comandos e configurações do painel. Com o painel aberto, o intervalo cai para 10 s.
 
 ## 4. O que ele faz (exemplos de voz)
 | Área | Exemplos |
@@ -136,14 +155,16 @@ O painel só consulta o Netlify a cada 10 s com a aba visível. Diagnóstico do 
 
 ## 6. Estrutura
 ```
-firmware/                    projeto ESP-IDF (ESP32-S3)
-  main/main.cpp              laço principal: conversa, botão, eventos, sync
-  main/listener.h            INMP441 + AFE (eco, ruído, VAD) + WakeNet "Jarvis" + gravação na PSRAM
-  main/speaker.h             2x MAX98357A, sons, player MP3 (libhelix) e referência do eco
-  main/net_link.h            HTTP keep-alive para o Netlify + Groq Whisper em streaming
-  main/agenda.h              alarmes, lembretes, timers e rotinas na NVS
-  sdkconfig.defaults         PSRAM octal, TLS na PSRAM, WakeNet9 "Jarvis"
-  partitions.csv             2x app (OTA) + partição "model" do ESP-SR
+firmware/jarvis_s3/          sketch da Arduino IDE (ESP32-S3)
+  jarvis_s3.ino              laço principal: conversa, botão, eventos, sync
+  listener.h                 INMP441 + AFE (eco, ruído, VAD) + WakeNet + gravação na PSRAM
+  speaker.h                  2x MAX98357A, sons, player MP3 (libhelix) e referência do eco
+  net_link.h                 HTTP keep-alive para o Netlify + Groq Whisper em streaming
+  agenda.h                   alarmes, lembretes, timers e rotinas na NVS
+  config.h                   pinos e ajustes
+firmware/srmodels_jarvis.bin modelos de voz "Jarvis" + "Hi ESP" (ESP-SR)
+firmware/idf/                build opcional pelo ESP-IDF (mesmo código)
+firmware/tools/espota.py     atualização pelo WiFi via linha de comando
 netlify/functions            api.mjs (painel + sync), voice.mjs (turno/TTS), youversion-daily.mjs
 netlify/lib                  agente, TTS, YouVersion, Spotify, Tuya, informações, armazenamento
 public/index.html            painel
