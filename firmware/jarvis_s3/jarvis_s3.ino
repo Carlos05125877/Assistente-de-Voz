@@ -8,6 +8,11 @@
  * "Jarvis" tambem interrompe o Jarvis enquanto ele fala (cancelamento de eco).
  * Alarmes, lembretes, timers e rotinas com horario rodam aqui, mesmo sem internet.
  * Botao: toque = falar/interromper | segurar 2 s = microfone mudo (privacidade).
+ *
+ * Arduino IDE (placa "ESP32S3 Dev Module"):
+ *   USB CDC On Boot: Enabled | Flash Size: 16MB | PSRAM: OPI PSRAM
+ *   Partition Scheme: "ESP SR 16M (3MB APP/6MB SPIFFS/3.9MB MODEL)"
+ *   Bibliotecas: ArduinoJson 6.21.x e arduino-libhelix (ZIP do GitHub). Veja o README.
  * ============================================================================
  */
 #include <Arduino.h>
@@ -17,6 +22,9 @@
 #include <Preferences.h>
 #include <ArduinoJson.h>
 #include <sys/time.h>
+// Nao usamos a classe ESP_SR, mas incluir o cabecalho faz a Arduino IDE gravar o arquivo de
+// modelos (srmodels.bin) na particao "model" junto com o sketch. Sem isso nao ha palavra de ativacao.
+#include "ESP_SR.h"
 #include <time.h>
 #include "config.h"
 #include "speaker.h"
